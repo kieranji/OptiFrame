@@ -24,4 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "OptiFrame"
 include(":app")
- 
+include(":protocol-core")
