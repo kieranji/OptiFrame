@@ -202,4 +202,45 @@ object Of8SpatialPermutation {
             result
         }
     }
+
+    fun inversePermuteConfidence(
+        permuted: DoubleArray,
+        frameSequence: Long,
+        slotIndex: Int
+    ): DoubleArray {
+
+        require(permuted.size == N) {
+            "Expected $N confidence values"
+        }
+
+        val params =
+            deriveParameters(
+                frameSequence,
+                slotIndex
+            )
+
+        val result =
+            DoubleArray(N)
+
+        for (j in 0 until N) {
+
+            val delta =
+                floorMod(
+                    j - params.b,
+                    N
+                )
+
+            val i =
+                (
+                        params.aInverse.toLong() *
+                                delta
+                        ).mod(N.toLong())
+                    .toInt()
+
+            result[i] =
+                permuted[j]
+        }
+
+        return result
+    }
 }

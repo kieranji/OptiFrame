@@ -142,12 +142,86 @@ object ProtocolConstants {
     // Global header
     // -------------------------------------------------------------------------
 
+    // 18 B fields + 1 B CRC-8/ATM
+    const val GLOBAL_HEADER_PRE_CRC_BYTES: Int = 18
     const val GLOBAL_HEADER_DATA_BYTES: Int = 19
+
+    // Shortened RS(31,19)
     const val GLOBAL_HEADER_RS_BYTES: Int = 31
 
+    // Mother code RS(255,243), parity = 12
+    const val GLOBAL_HEADER_RS_MOTHER_DATA_BYTES: Int = 243
+    const val GLOBAL_HEADER_RS_MOTHER_CODEWORD_BYTES: Int = 255
+    const val GLOBAL_HEADER_RS_PARITY_BYTES: Int = 12
+    const val GLOBAL_HEADER_RS_SHORTENING_BYTES: Int = 224
+
+    // Palette IDs
+    const val PALETTE_OF4_FIXED: Int = 0
+    const val PALETTE_OF8_FIXED: Int = 1
+
+    // Frame types
+    const val FRAME_TYPE_CAL_GEOMETRY: Int = 0x01
+    const val FRAME_TYPE_CAL_COLOR: Int = 0x02
+    const val FRAME_TYPE_PROFILE_PROBE: Int = 0x03
+
+    const val FRAME_TYPE_DATA: Int = 0x10
+    const val FRAME_TYPE_REPAIR: Int = 0x11
+    const val FRAME_TYPE_END: Int = 0x20
     // -------------------------------------------------------------------------
     // RaptorQ
     // -------------------------------------------------------------------------
 
     const val MAX_SOURCE_SYMBOLS_PER_BLOCK: Int = 1024
+
+    const val OF8_SOURCE_BLOCK_MAX_BYTES: Int =
+        OF8_SOURCE_SYMBOL_BYTES *
+                MAX_SOURCE_SYMBOLS_PER_BLOCK
+
+    // -------------------------------------------------------------------------
+    // Manifest
+    // -------------------------------------------------------------------------
+
+    val MANIFEST_MAGIC: ByteArray =
+        byteArrayOf(
+            0x4F.toByte(), // O
+            0x46.toByte(), // F
+            0x4D.toByte(), // M
+            0x31.toByte()  // 1
+        )
+
+    const val MANIFEST_VERSION: Int = 0x01
+
+    const val MANIFEST_FLAG_CREATED_AT: Int = 0x01
+    const val MANIFEST_FLAG_MIME_TYPE: Int = 0x02
+
+    const val MANIFEST_KNOWN_FLAGS_MASK: Int =
+        MANIFEST_FLAG_CREATED_AT or
+                MANIFEST_FLAG_MIME_TYPE
+
+    const val MAX_MANIFEST_STRING_BYTES: Int = 0xFFFF
+
+    // -------------------------------------------------------------------------
+    // Bootstrap
+    // -------------------------------------------------------------------------
+
+    const val BOOTSTRAP_FIXED_BYTES: Int = 87
+    const val MAX_CONTROL_ENDPOINT_BYTES: Int = 0xFFFF
+
+    // -------------------------------------------------------------------------
+    // Global header matrix
+    // -------------------------------------------------------------------------
+
+    const val GLOBAL_HEADER_MATRIX_WIDTH: Int = 16
+    const val GLOBAL_HEADER_MATRIX_HEIGHT: Int = 16
+
+    const val GLOBAL_HEADER_MATRIX_CELLS: Int =
+        GLOBAL_HEADER_MATRIX_WIDTH *
+                GLOBAL_HEADER_MATRIX_HEIGHT
+
+    const val GLOBAL_HEADER_RS_BITS: Int =
+        GLOBAL_HEADER_RS_BYTES * 8
+
+    const val GLOBAL_HEADER_FIXED_CELLS: Int =
+        GLOBAL_HEADER_MATRIX_CELLS -
+                GLOBAL_HEADER_RS_BITS
 }
