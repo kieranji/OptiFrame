@@ -337,6 +337,9 @@ private fun SenderHome(
             )
         } else null
     }
+    DisposableEffect(receivePipeline) {
+        onDispose { receivePipeline?.close() }
+    }
     val anchorTracker = remember(receivePipeline) { P1AnchorTracker() }
     val threeAPolicy = remember(receivePipeline) { P1ThreeALockPolicy() }
     val threeAControlRef = remember { AtomicReference<P1CameraThreeAControl?>(null) }

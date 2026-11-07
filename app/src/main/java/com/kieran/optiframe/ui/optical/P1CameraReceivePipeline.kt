@@ -30,15 +30,17 @@ class P1CameraReceivePipeline(
         val metrics: P1M3TransferMetrics
     )
 
-    private val receiver: P1M3ReceiverSession by lazy(LazyThreadSafetyMode.NONE) {
+    private val receiverDelegate = lazy(LazyThreadSafetyMode.NONE) {
         OpenRqRaptorQ.m3ReceiverSession(
             manifest,
             bootstrap.sessionId,
             spoolFile = outputFile?.let { File("${it.path}.part") }
         )
     }
+    private val receiver by receiverDelegate
     private var completedFile: ByteArray? = null
     private var completed = false
+    private var closed = false
     private var mixedFramesDropped = 0L
 
     init {
@@ -56,6 +58,7 @@ class P1CameraReceivePipeline(
 
     @Synchronized
     fun accept(image: ImageProxy, anchors: P1PerspectiveSampler.AnchorPoints): FrameResult {
+        check(!closed) { "Receiver pipeline is closed" }
         if (completed) {
             return FrameResult(bootstrap.sessionId, completedFile, true, currentMetrics())
         }
@@ -94,7 +97,7 @@ class P1CameraReceivePipeline(
 
     @Synchronized
     fun pollStall(nowNanos: Long = System.nanoTime()) {
-        if (completed) return
+        if (closed || completed) return
         val block = stallWatchdog?.poll(nowNanos) ?: return
         receiver.stallRepairFeedback(block)?.let(onFeedback)
     }
@@ -102,10 +105,23 @@ class P1CameraReceivePipeline(
     /** Completes a zero-source-block (empty) transfer before any frame arrives. */
     @Synchronized
     fun finishIfComplete(): FrameResult? {
+        check(!closed) { "Receiver pipeline is closed" }
         if (completed) return FrameResult(bootstrap.sessionId, completedFile, true, currentMetrics())
         if (!receiver.isComplete) return null
         finish()
         return FrameResult(bootstrap.sessionId, completedFile, true, currentMetrics())
+    }
+
+    @Synchronized
+    fun close() {
+        if (closed) return
+        closed = true
+        if (receiverDelegate.isInitialized()) {
+            runCatching { receiver.close() }
+        }
+        if (!completed) {
+            outputFile?.let { File("${it.path}.part").delete() }
+        }
     }
 
     private fun finish() {
