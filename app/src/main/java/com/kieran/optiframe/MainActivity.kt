@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -28,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -150,6 +154,8 @@ class MainActivity : ComponentActivity() {
 
 private data class SelectedFile(val name: String, val mimeType: String?, val file: File)
 
+private enum class HomeMode { SEND, RECEIVE }
+
 @Composable
 private fun SenderHome(
     readFile: suspend (Uri) -> SelectedFile,
@@ -169,6 +175,7 @@ private fun SenderHome(
     var bleServer by remember { mutableStateOf<P1BleControlServer?>(null) }
     var bleClient by remember { mutableStateOf<P1BleControlClient?>(null) }
     var status by remember { mutableStateOf("Choose a file to prepare a P1 SAFE30 transfer.") }
+    var homeMode by rememberSaveable { mutableStateOf(HomeMode.SEND) }
     var busy by remember { mutableStateOf(false) }
     var transferState by remember { mutableStateOf<P1Safe30DisplayState?>(null) }
     var receiving by remember { mutableStateOf(false) }
@@ -779,32 +786,55 @@ private fun SenderHome(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text("OptiFrame", style = MaterialTheme.typography.headlineMedium)
-                Text(status, modifier = Modifier.padding(vertical = 16.dp))
-                Button(enabled = !busy, onClick = { fast60Selected = false; picker.launch(arrayOf("*/*")) }) {
-                    Text(if (busy) "Preparing…" else "Choose file")
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(top = 16.dp)) {
+                    SegmentedButton(
+                        selected = homeMode == HomeMode.SEND,
+                        onClick = { homeMode = HomeMode.SEND },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                    ) { Text("Send") }
+                    SegmentedButton(
+                        selected = homeMode == HomeMode.RECEIVE,
+                        onClick = { homeMode = HomeMode.RECEIVE },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                    ) { Text("Receive") }
                 }
-                OutlinedButton(enabled = !busy, onClick = {
-                    val permissions = if (Build.VERSION.SDK_INT >= 31) arrayOf(
-                        android.Manifest.permission.BLUETOOTH_ADVERTISE,
-                        android.Manifest.permission.BLUETOOTH_CONNECT
-                    ) else arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
-                    m4SenderPermissionLauncher.launch(permissions)
-                }) { Text("Prepare experimental M4 FAST60 + BLE") }
-                OutlinedButton(onClick = {
-                    manifestPicker.launch(arrayOf("application/octet-stream", "application/*", "*/*"))
-                }) { Text("Import receiver manifest") }
-                Text(manifestStatus, style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(enabled = importedManifest != null, onClick = {
-                    bootstrapPicker.launch(arrayOf("application/octet-stream", "application/*", "*/*"))
-                }) { Text("Import sender bootstrap") }
-                OutlinedButton(onClick = {
-                    cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
-                },
-                    enabled = importedManifest != null && (
-                        importedBootstrap?.let { (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) == 0L } != false ||
-                            bleStatus == "BLE feedback connected"
-                        )
-                ) { Text("Start receiver camera") }
+                when (homeMode) {
+                    HomeMode.SEND -> {
+                        Text(status, modifier = Modifier.padding(vertical = 16.dp))
+                        Button(enabled = !busy, onClick = {
+                            fast60Selected = false
+                            picker.launch(arrayOf("*/*"))
+                        }) {
+                            Text(if (busy) "Preparing…" else "Choose file")
+                        }
+                        OutlinedButton(enabled = !busy, onClick = {
+                            val permissions = if (Build.VERSION.SDK_INT >= 31) arrayOf(
+                                android.Manifest.permission.BLUETOOTH_ADVERTISE,
+                                android.Manifest.permission.BLUETOOTH_CONNECT
+                            ) else arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                            m4SenderPermissionLauncher.launch(permissions)
+                        }) { Text("Prepare experimental M4 FAST60 + BLE") }
+                    }
+                    HomeMode.RECEIVE -> {
+                        OutlinedButton(onClick = {
+                            manifestPicker.launch(arrayOf("application/octet-stream", "application/*", "*/*"))
+                        }) { Text("Import receiver manifest") }
+                        Text(manifestStatus, style = MaterialTheme.typography.bodySmall)
+                        OutlinedButton(enabled = importedManifest != null, onClick = {
+                            bootstrapPicker.launch(arrayOf("application/octet-stream", "application/*", "*/*"))
+                        }) { Text("Import sender bootstrap") }
+                        OutlinedButton(onClick = {
+                            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+                        },
+                            enabled = importedManifest != null && (
+                                importedBootstrap?.let {
+                                    (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) == 0L
+                                } != false ||
+                                    bleStatus == "BLE feedback connected"
+                                )
+                        ) { Text("Start receiver camera") }
+                    }
+                }
                 Text(
                     "M3 SAFE30 and experimental M4 FAST60. FAST60 depends on BLE feedback and device timing; calibrate four corner anchors.",
                     modifier = Modifier.padding(top = 16.dp),
