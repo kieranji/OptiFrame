@@ -128,15 +128,11 @@ object P1AnchorDetector {
         }.getOrNull() ?: return null
         val refined = ArrayList<Cluster>(quad.size)
         for (cluster in quad) {
-            refined += refineAnchor(
-                dark,
-                luma.width,
-                luma.height,
-                cluster,
-                maxOffsetSteps = 12,
-                coarseOffsetSteps = 5,
-                coarseOffsetStepMultiplier = 2.0
+            val offsetStep = max(1.0, cluster.module / 2.0)
+            val coarse = locateCoarse(
+                dark, luma.width, luma.height, cluster, offsetStep, maxOffsetSteps = 6
             ) ?: return null
+            refined += refineAnchor(dark, luma.width, luma.height, coarse) ?: return null
         }
         if (!validQuad(refined)) return null
         return runCatching { refineDetection(luma, threshold, refined) }
@@ -337,39 +333,28 @@ object P1AnchorDetector {
         return clusters
     }
 
-    private fun refineAnchor(
+    private fun locateCoarse(
         dark: BooleanArray,
         width: Int,
         height: Int,
         cluster: Cluster,
-        maxOffsetSteps: Int = 3,
-        coarseOffsetSteps: Int = 2,
-        coarseOffsetStepMultiplier: Double = 1.0
+        offsetStep: Double,
+        maxOffsetSteps: Int
     ): Cluster? {
-        val offsetStep = max(1.0, cluster.module / 2.0)
-        if (coarseTemplateMatches(
-                dark,
-                width,
-                height,
-                cluster,
-                offsetStep * coarseOffsetStepMultiplier,
-                coarseOffsetSteps
-            ) < PREFILTER_MIN_MATCHES
-        ) return null
         var bestMatches = 0
         var bestX = cluster.x
         var bestY = cluster.y
         var bestModule = cluster.module
-        for (moduleFactor in doubleArrayOf(0.8, 0.9, 1.0, 1.1, 1.2)) {
+        for (moduleFactor in doubleArrayOf(0.9, 1.0, 1.1)) {
             val module = cluster.module * moduleFactor
-            for (angleDegrees in -MAX_ROLL_DEGREES..MAX_ROLL_DEGREES step 3) {
+            for (angleDegrees in -15..15 step 5) {
                 val angle = Math.toRadians(angleDegrees.toDouble())
                 val cosine = kotlin.math.cos(angle)
                 val sine = kotlin.math.sin(angle)
                 for (offsetX in -maxOffsetSteps..maxOffsetSteps) {
                     for (offsetY in -maxOffsetSteps..maxOffsetSteps) {
-                        val x = cluster.x + offsetX * offsetStep
-                        val y = cluster.y + offsetY * offsetStep
+                        val x = cluster.x + offsetX * offsetStep * 2.0
+                        val y = cluster.y + offsetY * offsetStep * 2.0
                         var matches = 0
                         for (localY in 0 until 6) for (localX in 0 until 6) {
                             val dx = (localX - 2.5) * module
@@ -390,26 +375,27 @@ object P1AnchorDetector {
                 }
             }
         }
-        return if (bestMatches >= 32) Cluster(bestX, bestY, bestModule, cluster.hits, bestMatches) else null
+        return if (bestMatches >= PREFILTER_MIN_MATCHES) {
+            Cluster(bestX, bestY, bestModule, cluster.hits, bestMatches)
+        } else {
+            null
+        }
     }
 
-    /** Cheap template check that rejects most false row patterns before the full search. */
-    private fun coarseTemplateMatches(
-        dark: BooleanArray,
-        width: Int,
-        height: Int,
-        cluster: Cluster,
-        offsetStep: Double,
-        maxOffsetSteps: Int = 2
-    ): Int {
-        var best = 0
-        for (moduleFactor in doubleArrayOf(0.75, 1.0, 1.25)) for (angleDegrees in -12..12 step 6) {
+    private fun refineAnchor(dark: BooleanArray, width: Int, height: Int, cluster: Cluster): Cluster? {
+        val offsetStep = max(1.0, cluster.module / 2.0)
+        if (coarseTemplateMatches(dark, width, height, cluster, offsetStep) < PREFILTER_MIN_MATCHES) return null
+        var bestMatches = 0
+        var bestX = cluster.x
+        var bestY = cluster.y
+        var bestModule = cluster.module
+        for (moduleFactor in doubleArrayOf(0.8, 0.9, 1.0, 1.1, 1.2)) {
             val module = cluster.module * moduleFactor
-            val angle = Math.toRadians(angleDegrees.toDouble())
-            val cosine = kotlin.math.cos(angle)
-            val sine = kotlin.math.sin(angle)
-            for (offsetX in -maxOffsetSteps..maxOffsetSteps) {
-                for (offsetY in -maxOffsetSteps..maxOffsetSteps) {
+            for (angleDegrees in -MAX_ROLL_DEGREES..MAX_ROLL_DEGREES step 3) {
+                val angle = Math.toRadians(angleDegrees.toDouble())
+                val cosine = kotlin.math.cos(angle)
+                val sine = kotlin.math.sin(angle)
+                for (offsetX in -3..3) for (offsetY in -3..3) {
                     val x = cluster.x + offsetX * offsetStep
                     val y = cluster.y + offsetY * offsetStep
                     var matches = 0
@@ -422,8 +408,42 @@ object P1AnchorDetector {
                         val expectedDark = P1ControlBandLayout.anchorLabel(localX, localY) == 0
                         if (dark[sampleY * width + sampleX] == expectedDark) matches++
                     }
-                    if (matches > best) best = matches
+                    if (matches > bestMatches) {
+                        bestMatches = matches
+                        bestX = x
+                        bestY = y
+                        bestModule = module
+                    }
                 }
+            }
+        }
+        return if (bestMatches >= 32) Cluster(bestX, bestY, bestModule, cluster.hits, bestMatches) else null
+    }
+
+    /** Cheap template check that rejects most false row patterns before the full search. */
+    private fun coarseTemplateMatches(
+        dark: BooleanArray, width: Int, height: Int, cluster: Cluster, offsetStep: Double
+    ): Int {
+        var best = 0
+        for (moduleFactor in doubleArrayOf(0.75, 1.0, 1.25)) for (angleDegrees in -12..12 step 6) {
+            val module = cluster.module * moduleFactor
+            val angle = Math.toRadians(angleDegrees.toDouble())
+            val cosine = kotlin.math.cos(angle)
+            val sine = kotlin.math.sin(angle)
+            for (offsetX in -2..2) for (offsetY in -2..2) {
+                val x = cluster.x + offsetX * offsetStep
+                val y = cluster.y + offsetY * offsetStep
+                var matches = 0
+                for (localY in 0 until 6) for (localX in 0 until 6) {
+                    val dx = (localX - 2.5) * module
+                    val dy = (localY - 2.5) * module
+                    val sampleX = (x + cosine * dx - sine * dy).roundToInt()
+                    val sampleY = (y + sine * dx + cosine * dy).roundToInt()
+                    if (sampleX !in 0 until width || sampleY !in 0 until height) continue
+                    val expectedDark = P1ControlBandLayout.anchorLabel(localX, localY) == 0
+                    if (dark[sampleY * width + sampleX] == expectedDark) matches++
+                }
+                if (matches > best) best = matches
             }
         }
         return best

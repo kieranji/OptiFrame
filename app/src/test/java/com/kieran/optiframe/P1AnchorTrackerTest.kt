@@ -172,12 +172,15 @@ class P1AnchorTrackerTest {
             assertNotNull(P1AnchorDetector.track(frame, previous))
             (System.nanoTime() - started) / 1_000_000.0
         }
+        val detectMs = detectMillis.average()
+        val trackMs = trackMillis.average()
 
         println(
             "P1AnchorTracker 960x640 mean: detect=%.2f ms, track=%.2f ms".format(
-                Locale.US, detectMillis.average(), trackMillis.average()
+                Locale.US, detectMs, trackMs
             )
         )
+        assertTrue(trackMs < detectMs / 2.0)
     }
 
     private fun detect(homography: DoubleArray, seed: Long) = checkNotNull(
