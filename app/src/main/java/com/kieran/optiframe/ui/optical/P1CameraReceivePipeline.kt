@@ -11,6 +11,7 @@ import com.kieran.optiframe.protocol.P1M3ReceiverSession
 import com.kieran.optiframe.protocol.P1M3TransferMetrics
 import com.kieran.optiframe.protocol.P1CompositeFrameException
 import com.kieran.optiframe.protocol.RaptorQBlockFeedback
+import com.kieran.optiframe.protocol.P1ReceiverStallWatchdog
 
 /** Camera frame -> perspective sampling -> P1 decode -> RaptorQ file verification. */
 class P1CameraReceivePipeline(
@@ -20,7 +21,8 @@ class P1CameraReceivePipeline(
     private val erasureThreshold: Double = DEFAULT_ERASURE_THRESHOLD,
     private val outputFile: File? = null,
     private val onTransferComplete: () -> Unit = {},
-    private val requestRepairsOnlyOnSlotFailures: Boolean = false
+    private val requestRepairsOnlyOnSlotFailures: Boolean = false,
+    private val stallWatchdog: P1ReceiverStallWatchdog? = null
 ) {
     data class FrameResult(
         val sessionId: Long,
@@ -70,6 +72,11 @@ class P1CameraReceivePipeline(
             erasureThreshold = erasureThreshold,
             requestRepairsOnlyOnSlotFailures = requestRepairsOnlyOnSlotFailures
         )
+        stallWatchdog?.onFrame(
+            decoded.frame.header.sourceBlockNumber,
+            result,
+            System.nanoTime()
+        )
         result.feedback?.let(onFeedback)
         if (receiver.isComplete) {
             finish()
@@ -80,6 +87,13 @@ class P1CameraReceivePipeline(
             verified = completed,
             metrics = currentMetrics()
         )
+    }
+
+    @Synchronized
+    fun pollStall(nowNanos: Long = System.nanoTime()) {
+        if (completed) return
+        val block = stallWatchdog?.poll(nowNanos) ?: return
+        receiver.stallRepairFeedback(block)?.let(onFeedback)
     }
 
     /** Completes a zero-source-block (empty) transfer before any frame arrives. */

@@ -47,6 +47,7 @@ import com.kieran.optiframe.protocol.P1M3TransferMetrics
 import com.kieran.optiframe.protocol.P1M3BenchmarkReportJson
 import com.kieran.optiframe.protocol.P1ControlMessage
 import com.kieran.optiframe.protocol.OptiFrameCapabilities
+import com.kieran.optiframe.protocol.P1ReceiverStallWatchdog
 import com.kieran.optiframe.protocol.ProtocolConstants
 import com.kieran.optiframe.protocol.RaptorQSymbol
 import com.kieran.optiframe.protocol.OpenRqRaptorQ
@@ -321,7 +322,8 @@ private fun SenderHome(
                             )
                         )
                     }
-                }
+                },
+                stallWatchdog = if (m4Control) P1ReceiverStallWatchdog() else null
             )
         } else null
     }
@@ -491,6 +493,7 @@ private fun SenderHome(
                     cameraStatus = "Tap the four anchor centers clockwise, starting at top-left."
                 }
                 val pipeline = receivePipeline
+                if (pipeline != null && verifiedFile == null) runCatching { pipeline.pollStall() }
                 if (pipeline == null && importedManifest != null && importedBootstrap == null &&
                     qrFrameCounter.incrementAndGet() % 3 == 0
                 ) {

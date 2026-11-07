@@ -22,6 +22,12 @@ class RaptorQFileReceiverSession(
     fun accept(item: RaptorQTransmissionItem): RaptorQBlockReceiveResult =
         receiver.accept(item)
 
+    fun sourceSymbolCount(sourceBlockNumber: Int): Int =
+        receiver.sourceSymbolCount(sourceBlockNumber)
+
+    fun uniqueSymbolsReceived(sourceBlockNumber: Int): Int =
+        receiver.uniqueSymbolsReceived(sourceBlockNumber)
+
     fun acceptAndFeedback(
         item: RaptorQTransmissionItem,
         additionalRepairSymbolsIfIncomplete: Int = 0
