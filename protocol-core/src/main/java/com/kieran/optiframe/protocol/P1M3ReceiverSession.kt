@@ -136,6 +136,18 @@ class P1M3ReceiverSession(
         if (verifiedAtNanos == null) verifiedAtNanos = System.nanoTime()
     }
 
+    /** Repair request for a stalled incomplete block: its missing source symbols plus the normal margin. */
+    fun stallRepairFeedback(sourceBlockNumber: Int): RaptorQBlockFeedback? {
+        val sourceSymbolCount = fileReceiver.sourceSymbolCount(sourceBlockNumber)
+        val uniqueSymbolsReceived = fileReceiver.uniqueSymbolsReceived(sourceBlockNumber)
+        val additionalRepairSymbols = (
+            (sourceSymbolCount - uniqueSymbolsReceived).coerceAtLeast(0) +
+                DEFAULT_ADDITIONAL_REPAIR_SYMBOLS
+            ).coerceAtMost(0xFFFF)
+        return fileReceiver.feedbackFor(sourceBlockNumber, additionalRepairSymbols)
+            .takeUnless { it.blockDecoded }
+    }
+
     companion object {
         /** Two repairs per newly observed incomplete logical frame (~16.7% for 12 full P1 slots). */
         const val DEFAULT_ADDITIONAL_REPAIR_SYMBOLS: Int = 2
