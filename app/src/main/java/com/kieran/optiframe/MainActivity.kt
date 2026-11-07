@@ -580,7 +580,7 @@ private fun SenderHome(
                         threeAControlRef.get()?.unlock()
                     }
                     calibratedAnchors = anchors
-                    cameraStatus = if (anchors == null) "Tap the four corner-anchor centers clockwise, starting at top-left."
+                    cameraStatus = if (anchors == null) "Point the camera at the sender's optical matrix; anchors are detected automatically."
                     else "Geometry calibrated; align and hold the optical frame steady."
                 },
                 onCalibrationProgress = { count ->
@@ -588,7 +588,7 @@ private fun SenderHome(
                 },
                 onImage = { image: ImageProxy ->
                 if (cameraStatus == "Camera ready" || cameraStatus == "Starting camera…") {
-                    cameraStatus = "Tap the four anchor centers clockwise, starting at top-left."
+                    cameraStatus = "Point the camera at the sender's optical matrix; anchors are detected automatically."
                 }
                 val pipeline = receivePipeline
                 if (pipeline != null && verifiedFile == null) runCatching { pipeline.pollStall() }
@@ -697,17 +697,27 @@ private fun SenderHome(
                         if (usingAuto) anchorTracker.onDecodeResult(true)
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
-                            cameraStatus.startsWith("Receiving")
+                            cameraStatus.startsWith("Receiving") ||
+                            cameraStatus.startsWith("Waiting for the sender to start")
                         ) {
-                            cameraStatus = "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                            cameraStatus = if (pipeline.metrics.macroblocksDecoded == 0L) {
+                                "Waiting for the sender to start the optical stream (press Start on the sender)…"
+                            } else {
+                                "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                            }
                         }
                     } catch (error: IllegalArgumentException) {
                         if (usingAuto) anchorTracker.onDecodeResult(false)
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
-                            cameraStatus.startsWith("Receiving")
+                            cameraStatus.startsWith("Receiving") ||
+                            cameraStatus.startsWith("Waiting for the sender to start")
                         ) {
-                            cameraStatus = "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                            cameraStatus = if (pipeline.metrics.macroblocksDecoded == 0L) {
+                                "Waiting for the sender to start the optical stream (press Start on the sender)…"
+                            } else {
+                                "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                            }
                         }
                     } catch (error: IllegalStateException) {
                         if (pipeline.verificationFailed) {

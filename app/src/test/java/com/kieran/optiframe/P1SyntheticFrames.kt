@@ -1,16 +1,46 @@
 package com.kieran.optiframe
 
 import com.kieran.optiframe.protocol.P1ControlBandLayout
+import com.kieran.optiframe.protocol.Of8Palette
 import com.kieran.optiframe.ui.optical.P1AnchorDetector
 import com.kieran.optiframe.ui.optical.P1PerspectiveSampler
 import org.junit.Assert.assertTrue
 import java.util.Random
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 internal object P1SyntheticFrames {
-    fun frontalHomography(): DoubleArray =
-        doubleArrayOf(5.0, 0.0, 80.0, 0.0, 5.0, 80.0, 0.0, 0.0)
+    fun frontalHomography(
+        scale: Double = 5.0,
+        offsetX: Double = 80.0,
+        offsetY: Double = 80.0
+    ): DoubleArray =
+        doubleArrayOf(scale, 0.0, offsetX, 0.0, scale, offsetY, 0.0, 0.0)
+
+    fun composeHomographies(outer: DoubleArray, inner: DoubleArray): DoubleArray {
+        val first = arrayOf(
+            doubleArrayOf(outer[0], outer[1], outer[2]),
+            doubleArrayOf(outer[3], outer[4], outer[5]),
+            doubleArrayOf(outer[6], outer[7], 1.0)
+        )
+        val second = arrayOf(
+            doubleArrayOf(inner[0], inner[1], inner[2]),
+            doubleArrayOf(inner[3], inner[4], inner[5]),
+            doubleArrayOf(inner[6], inner[7], 1.0)
+        )
+        val composed = Array(3) { row ->
+            DoubleArray(3) { column ->
+                (0..2).sumOf { first[row][it] * second[it][column] }
+            }
+        }
+        val scale = composed[2][2]
+        return doubleArrayOf(
+            composed[0][0] / scale, composed[0][1] / scale, composed[0][2] / scale,
+            composed[1][0] / scale, composed[1][1] / scale, composed[1][2] / scale,
+            composed[2][0] / scale, composed[2][1] / scale
+        )
+    }
 
     fun rolledPerspective(): DoubleArray {
         val angle = Math.toRadians(6.0)
@@ -37,7 +67,10 @@ internal object P1SyntheticFrames {
         homography: DoubleArray,
         includeAnchors: Boolean,
         seed: Long,
-        noiseSigma: Double = 0.0
+        noiseSigma: Double = 0.0,
+        includePilots: Boolean = false,
+        canvasWidth: Int = 960,
+        canvasHeight: Int = 640
     ): P1PerspectiveSampler.PlaneView {
         val random = Random(seed)
         val labels = IntArray(160 * 96) {
@@ -51,9 +84,20 @@ internal object P1SyntheticFrames {
                 }
             }
         }
+        if (includePilots) {
+            for (rect in listOf(P1ControlBandLayout.leftPilots, P1ControlBandLayout.rightPilots)) {
+                for (localY in 0 until rect.height) for (localX in 0 until rect.width) {
+                    val color = Of8Palette.symbolToColor(
+                        P1ControlBandLayout.pilotLabel(localX, localY)
+                    )
+                    labels[(rect.y + localY) * 160 + rect.x + localX] =
+                        (0.299 * color.red + 0.587 * color.green + 0.114 * color.blue).roundToInt()
+                }
+            }
+        }
         val inverse = invert(homography)
-        val width = 960
-        val height = 640
+        val width = canvasWidth
+        val height = canvasHeight
         val data = ByteArray(width * height)
         for (y in 0 until height) for (x in 0 until width) {
             val (u, v) = P1PerspectiveSampler.map(inverse, x.toDouble(), y.toDouble())
@@ -73,7 +117,8 @@ internal object P1SyntheticFrames {
     fun assertAnchorsNearTruth(
         detection: P1AnchorDetector.Detection,
         homography: DoubleArray,
-        maxErrorCells: Double
+        maxErrorCells: Double,
+        pixelsPerCell: Double = 5.0
     ) {
         val actual = listOf(
             detection.anchors.topLeftX to detection.anchors.topLeftY,
@@ -95,7 +140,7 @@ internal object P1SyntheticFrames {
             val errorCells = kotlin.math.hypot(
                 actual[index].first - expected.first,
                 actual[index].second - expected.second
-            ) / 5.0
+            ) / pixelsPerCell
             assertTrue(
                 "anchor $index error $errorCells exceeded $maxErrorCells cells",
                 errorCells < maxErrorCells
