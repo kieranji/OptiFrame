@@ -50,7 +50,7 @@ object P1AnchorDetector {
         P1ControlBandLayout.anchors[3],
         P1ControlBandLayout.anchors[2]
     )
-    private val anchors = anchorRects.map { rect ->
+    private val canonicalCenters = anchorRects.map { rect ->
         (rect.x + rect.width / 2.0) to (rect.y + rect.height / 2.0)
     }
     private val edgeOffsets = doubleArrayOf(1.0, 2.0, 4.0, 5.0)
@@ -60,23 +60,7 @@ object P1AnchorDetector {
      * assumes the frame is roughly upright (less than 45 degrees of roll).
      */
     internal fun detect(luma: P1PerspectiveSampler.PlaneView): Detection? {
-        if (luma.width <= 0 || luma.height <= 0 || luma.rowStride <= 0 || luma.pixelStride <= 0) {
-            return null
-        }
-        val lastOffset = (luma.height - 1L) * luma.rowStride +
-            (luma.width - 1L) * luma.pixelStride
-        if (lastOffset < 0 || lastOffset >= luma.data.size) return null
-
-        val threshold = otsuThreshold(luma)
-        val dark = BooleanArray(luma.width * luma.height)
-        for (y in 0 until luma.height) {
-            var offset = y * luma.rowStride
-            val rowOffset = y * luma.width
-            for (x in 0 until luma.width) {
-                dark[rowOffset + x] = (luma.data[offset].toInt() and 0xFF) <= threshold
-                offset += luma.pixelStride
-            }
-        }
+        val (threshold, dark) = binarize(luma) ?: return null
         val candidates = findCandidates(dark, luma.width, luma.height)
         val rawClusters = clusterCandidates(candidates)
         val potentialClusters = rawClusters.filter { it.hits >= 2 }
@@ -118,6 +102,67 @@ object P1AnchorDetector {
             }
         }
         return best?.detection
+    }
+
+    /** Re-locks [previous] in a new frame by re-searching each anchor near its last position; null if the lock is lost. */
+    internal fun track(
+        luma: P1PerspectiveSampler.PlaneView,
+        previous: Detection
+    ): Detection? {
+        val (threshold, dark) = binarize(luma) ?: return null
+        val previousAnchors = listOf(
+            previous.anchors.topLeftX to previous.anchors.topLeftY,
+            previous.anchors.topRightX to previous.anchors.topRightY,
+            previous.anchors.bottomRightX to previous.anchors.bottomRightY,
+            previous.anchors.bottomLeftX to previous.anchors.bottomLeftY
+        )
+        val quad = runCatching {
+            previousAnchors.mapIndexed { index, (x, y) ->
+                val (cx, cy) = canonicalCenters[index]
+                val left = P1PerspectiveSampler.map(previous.homography, cx - 0.5, cy)
+                val right = P1PerspectiveSampler.map(previous.homography, cx + 0.5, cy)
+                val module = hypot(right.first - left.first, right.second - left.second)
+                require(module.isFinite() && module > 0.0)
+                Cluster(x, y, module, hits = 0)
+            }
+        }.getOrNull() ?: return null
+        val refined = ArrayList<Cluster>(quad.size)
+        for (cluster in quad) {
+            refined += refineAnchor(
+                dark,
+                luma.width,
+                luma.height,
+                cluster,
+                maxOffsetSteps = 12,
+                coarseOffsetSteps = 5,
+                coarseOffsetStepMultiplier = 2.0
+            ) ?: return null
+        }
+        if (!validQuad(refined)) return null
+        return runCatching { refineDetection(luma, threshold, refined) }
+            .getOrNull()
+            ?.takeIf(::passesAcceptance)
+    }
+
+    private fun binarize(luma: P1PerspectiveSampler.PlaneView): Pair<Int, BooleanArray>? {
+        if (luma.width <= 0 || luma.height <= 0 || luma.rowStride <= 0 || luma.pixelStride <= 0) {
+            return null
+        }
+        val lastOffset = (luma.height - 1L) * luma.rowStride +
+            (luma.width - 1L) * luma.pixelStride
+        if (lastOffset < 0 || lastOffset >= luma.data.size) return null
+
+        val threshold = otsuThreshold(luma)
+        val dark = BooleanArray(luma.width * luma.height)
+        for (y in 0 until luma.height) {
+            var offset = y * luma.rowStride
+            val rowOffset = y * luma.width
+            for (x in 0 until luma.width) {
+                dark[rowOffset + x] = (luma.data[offset].toInt() and 0xFF) <= threshold
+                offset += luma.pixelStride
+            }
+        }
+        return threshold to dark
     }
 
     private fun passesAcceptance(detection: Detection): Boolean =
@@ -292,9 +337,25 @@ object P1AnchorDetector {
         return clusters
     }
 
-    private fun refineAnchor(dark: BooleanArray, width: Int, height: Int, cluster: Cluster): Cluster? {
+    private fun refineAnchor(
+        dark: BooleanArray,
+        width: Int,
+        height: Int,
+        cluster: Cluster,
+        maxOffsetSteps: Int = 3,
+        coarseOffsetSteps: Int = 2,
+        coarseOffsetStepMultiplier: Double = 1.0
+    ): Cluster? {
         val offsetStep = max(1.0, cluster.module / 2.0)
-        if (coarseTemplateMatches(dark, width, height, cluster, offsetStep) < PREFILTER_MIN_MATCHES) return null
+        if (coarseTemplateMatches(
+                dark,
+                width,
+                height,
+                cluster,
+                offsetStep * coarseOffsetStepMultiplier,
+                coarseOffsetSteps
+            ) < PREFILTER_MIN_MATCHES
+        ) return null
         var bestMatches = 0
         var bestX = cluster.x
         var bestY = cluster.y
@@ -305,7 +366,50 @@ object P1AnchorDetector {
                 val angle = Math.toRadians(angleDegrees.toDouble())
                 val cosine = kotlin.math.cos(angle)
                 val sine = kotlin.math.sin(angle)
-                for (offsetX in -3..3) for (offsetY in -3..3) {
+                for (offsetX in -maxOffsetSteps..maxOffsetSteps) {
+                    for (offsetY in -maxOffsetSteps..maxOffsetSteps) {
+                        val x = cluster.x + offsetX * offsetStep
+                        val y = cluster.y + offsetY * offsetStep
+                        var matches = 0
+                        for (localY in 0 until 6) for (localX in 0 until 6) {
+                            val dx = (localX - 2.5) * module
+                            val dy = (localY - 2.5) * module
+                            val sampleX = (x + cosine * dx - sine * dy).roundToInt()
+                            val sampleY = (y + sine * dx + cosine * dy).roundToInt()
+                            if (sampleX !in 0 until width || sampleY !in 0 until height) continue
+                            val expectedDark = P1ControlBandLayout.anchorLabel(localX, localY) == 0
+                            if (dark[sampleY * width + sampleX] == expectedDark) matches++
+                        }
+                        if (matches > bestMatches) {
+                            bestMatches = matches
+                            bestX = x
+                            bestY = y
+                            bestModule = module
+                        }
+                    }
+                }
+            }
+        }
+        return if (bestMatches >= 32) Cluster(bestX, bestY, bestModule, cluster.hits, bestMatches) else null
+    }
+
+    /** Cheap template check that rejects most false row patterns before the full search. */
+    private fun coarseTemplateMatches(
+        dark: BooleanArray,
+        width: Int,
+        height: Int,
+        cluster: Cluster,
+        offsetStep: Double,
+        maxOffsetSteps: Int = 2
+    ): Int {
+        var best = 0
+        for (moduleFactor in doubleArrayOf(0.75, 1.0, 1.25)) for (angleDegrees in -12..12 step 6) {
+            val module = cluster.module * moduleFactor
+            val angle = Math.toRadians(angleDegrees.toDouble())
+            val cosine = kotlin.math.cos(angle)
+            val sine = kotlin.math.sin(angle)
+            for (offsetX in -maxOffsetSteps..maxOffsetSteps) {
+                for (offsetY in -maxOffsetSteps..maxOffsetSteps) {
                     val x = cluster.x + offsetX * offsetStep
                     val y = cluster.y + offsetY * offsetStep
                     var matches = 0
@@ -318,42 +422,8 @@ object P1AnchorDetector {
                         val expectedDark = P1ControlBandLayout.anchorLabel(localX, localY) == 0
                         if (dark[sampleY * width + sampleX] == expectedDark) matches++
                     }
-                    if (matches > bestMatches) {
-                        bestMatches = matches
-                        bestX = x
-                        bestY = y
-                        bestModule = module
-                    }
+                    if (matches > best) best = matches
                 }
-            }
-        }
-        return if (bestMatches >= 32) Cluster(bestX, bestY, bestModule, cluster.hits, bestMatches) else null
-    }
-
-    /** Cheap template check that rejects most false row patterns before the full search. */
-    private fun coarseTemplateMatches(
-        dark: BooleanArray, width: Int, height: Int, cluster: Cluster, offsetStep: Double
-    ): Int {
-        var best = 0
-        for (moduleFactor in doubleArrayOf(0.75, 1.0, 1.25)) for (angleDegrees in -12..12 step 6) {
-            val module = cluster.module * moduleFactor
-            val angle = Math.toRadians(angleDegrees.toDouble())
-            val cosine = kotlin.math.cos(angle)
-            val sine = kotlin.math.sin(angle)
-            for (offsetX in -2..2) for (offsetY in -2..2) {
-                val x = cluster.x + offsetX * offsetStep
-                val y = cluster.y + offsetY * offsetStep
-                var matches = 0
-                for (localY in 0 until 6) for (localX in 0 until 6) {
-                    val dx = (localX - 2.5) * module
-                    val dy = (localY - 2.5) * module
-                    val sampleX = (x + cosine * dx - sine * dy).roundToInt()
-                    val sampleY = (y + sine * dx + cosine * dy).roundToInt()
-                    if (sampleX !in 0 until width || sampleY !in 0 until height) continue
-                    val expectedDark = P1ControlBandLayout.anchorLabel(localX, localY) == 0
-                    if (dark[sampleY * width + sampleX] == expectedDark) matches++
-                }
-                if (matches > best) best = matches
             }
         }
         return best
@@ -389,7 +459,6 @@ object P1AnchorDetector {
         threshold: Int,
         quad: List<Cluster>
     ): Detection {
-        val canonicalCenters = anchors
         var homography = fitHomography(canonicalCenters, quad.map { it.x to it.y })
         val correspondences = ArrayList<Correspondence>(36)
         for (index in quad.indices) {

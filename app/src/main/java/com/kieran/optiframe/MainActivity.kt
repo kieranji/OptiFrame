@@ -48,6 +48,7 @@ import com.kieran.optiframe.protocol.P1M3BenchmarkReportJson
 import com.kieran.optiframe.protocol.P1ControlMessage
 import com.kieran.optiframe.protocol.OptiFrameCapabilities
 import com.kieran.optiframe.protocol.P1ReceiverStallWatchdog
+import com.kieran.optiframe.protocol.P1CompositeFrameException
 import com.kieran.optiframe.protocol.ProtocolConstants
 import com.kieran.optiframe.protocol.RaptorQSymbol
 import com.kieran.optiframe.protocol.OpenRqRaptorQ
@@ -57,6 +58,7 @@ import com.kieran.optiframe.ui.optical.P1CameraPreview
 import com.kieran.optiframe.ui.optical.P1CameraReceivePipeline
 import com.kieran.optiframe.ui.optical.P1PerspectiveSampler
 import com.kieran.optiframe.ui.optical.P1AnchorDetector
+import com.kieran.optiframe.ui.optical.P1AnchorTracker
 import com.kieran.optiframe.ui.optical.P1BootstrapQr
 import com.kieran.optiframe.ui.ble.P1BleControlClient
 import com.kieran.optiframe.ui.ble.P1BleControlServer
@@ -69,7 +71,6 @@ import java.util.Locale
 import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -179,7 +180,6 @@ private fun SenderHome(
     var showBootstrapQr by remember { mutableStateOf(false) }
     var bleStatus by remember { mutableStateOf("BLE control is not connected") }
     val qrFrameCounter = remember { AtomicInteger(0) }
-    val lastAutoDetection = remember { AtomicReference<P1AnchorDetector.Detection?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val currentBleClient by rememberUpdatedState(bleClient)
@@ -327,6 +327,7 @@ private fun SenderHome(
             )
         } else null
     }
+    val anchorTracker = remember(receivePipeline) { P1AnchorTracker() }
 
     val m4ReceiverPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (grants.values.all { it }) {
@@ -387,7 +388,6 @@ private fun SenderHome(
                 verifiedFile = null
                 receiveMetrics = null
                 calibratedAnchors = null
-                lastAutoDetection.set(null)
                 manifestStatus = "Ready to receive ${importedManifest?.fileName ?: "file"}"
             } catch (error: Exception) {
                 importedManifest = null
@@ -395,7 +395,6 @@ private fun SenderHome(
                 verifiedFile = null
                 receiveMetrics = null
                 calibratedAnchors = null
-                lastAutoDetection.set(null)
                 manifestStatus = "Invalid manifest: ${error.message ?: "unknown error"}"
             }
         }
@@ -480,7 +479,7 @@ private fun SenderHome(
             P1CameraPreview(
                 modifier = Modifier.weight(1f),
                 onAnchorsChanged = { anchors ->
-                    if (anchors == null) lastAutoDetection.set(null)
+                    if (anchors == null) anchorTracker.reset()
                     calibratedAnchors = anchors
                     cameraStatus = if (anchors == null) "Tap the four corner-anchor centers clockwise, starting at top-left."
                     else "Geometry calibrated; align and hold the optical frame steady."
@@ -527,9 +526,7 @@ private fun SenderHome(
                     val planeView = P1PerspectiveSampler.PlaneView(
                         data, yPlane.rowStride, yPlane.pixelStride, image.width, image.height
                     )
-                    autoDetection = P1AnchorDetector.detect(planeView)
-                        ?.also { lastAutoDetection.set(it) }
-                        ?: lastAutoDetection.get()
+                    autoDetection = anchorTracker.locate(planeView)
                     if (autoDetection != null &&
                         !cameraStatus.startsWith("SHA-256 verified") &&
                         !cameraStatus.startsWith("Receiving")
@@ -541,10 +538,12 @@ private fun SenderHome(
                         )
                     }
                 }
+                val usingAuto = manualAnchors == null && autoDetection != null
                 val anchors = manualAnchors ?: autoDetection?.anchors
                 if (pipeline != null && anchors != null && verifiedFile == null) {
                     try {
                         val result = pipeline.accept(image, anchors)
+                        if (usingAuto) anchorTracker.onDecodeResult(true)
                         if (result.verified) {
                             verifiedFile = receiveFile
                             receiveMetrics = result.metrics
@@ -554,7 +553,16 @@ private fun SenderHome(
                         ) {
                             cameraStatus = "Receiving · ${result.metrics.macroblocksDecoded} macroblocks decoded."
                         }
+                    } catch (error: P1CompositeFrameException) {
+                        if (usingAuto) anchorTracker.onDecodeResult(true)
+                        if (cameraStatus.startsWith("Geometry calibrated") ||
+                            cameraStatus.startsWith("Auto anchors") ||
+                            cameraStatus.startsWith("Receiving")
+                        ) {
+                            cameraStatus = "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                        }
                     } catch (error: IllegalArgumentException) {
+                        if (usingAuto) anchorTracker.onDecodeResult(false)
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
                             cameraStatus.startsWith("Receiving")
@@ -625,7 +633,7 @@ private fun SenderHome(
                 Button(onClick = {
                     receiving = false
                     calibratedAnchors = null
-                    lastAutoDetection.set(null)
+                    anchorTracker.reset()
                 }) { Text("Stop camera") }
             }
         }
