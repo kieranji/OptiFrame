@@ -202,6 +202,8 @@ class P1BleControlClient(
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
                 controlCharacteristic = null
+                gatt.close()
+                this@P1BleControlClient.gatt = null
                 onState("BLE control disconnected")
             } else if (newState == BluetoothProfile.STATE_CONNECTED) {
                 onState("BLE connected; discovering control service")
