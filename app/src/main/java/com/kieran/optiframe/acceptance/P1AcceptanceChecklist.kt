@@ -68,11 +68,11 @@ object P1AcceptanceChecklist {
 
         val thermalMinutes = preset.thermalMillis / 60_000
         val thermalLabel =
-            "Thermal (<$thermalMinutes min): goodput drop ≤25% (memory growth not measured)"
+            "Thermal ($thermalMinutes-min run): goodput drop ≤25% (memory growth not measured)"
 
         return listOf(
             Item(
-                label = "100 MiB SHA-256 streak",
+                label = "${preset.fileBytes / (1024 * 1024)} MiB SHA-256 streak",
                 value = streak?.let { "$it/${preset.streakTarget}" } ?: "–",
                 passed = streak?.let { it >= preset.streakTarget }
             ),
