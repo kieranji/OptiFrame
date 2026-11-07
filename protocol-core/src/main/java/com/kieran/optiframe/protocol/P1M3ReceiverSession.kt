@@ -1,5 +1,6 @@
 package com.kieran.optiframe.protocol
 
+import java.io.File
 import java.io.OutputStream
 
 /** High-level M3 receiver for P1 slot decoding and RaptorQ file recovery. */
@@ -7,9 +8,10 @@ class P1M3ReceiverSession(
     manifest: OptiFrameManifest,
     decoderFactory: RaptorQBlockDecoderFactory,
     private val expectedSessionId: Long,
-    positions: List<P1SlotPosition> = P1SlotPosition.canonicalP1()
+    positions: List<P1SlotPosition> = P1SlotPosition.canonicalP1(),
+    spoolFile: File? = null
 ) {
-    private val fileReceiver = RaptorQFileReceiverSession(manifest, decoderFactory)
+    private val fileReceiver = RaptorQFileReceiverSession(manifest, decoderFactory, spoolFile)
     private val slotPositions = positions.toList()
     private val receivedFrameSequences = HashSet<Long>()
     private var lastFrameSequence: Long? = null
@@ -135,6 +137,14 @@ class P1M3ReceiverSession(
         fileReceiver.finishAndVerify(output)
         if (verifiedAtNanos == null) verifiedAtNanos = System.nanoTime()
     }
+
+    fun finishAndVerifySpooledFile(): File {
+        val file = fileReceiver.finishAndVerifySpooledFile()
+        if (verifiedAtNanos == null) verifiedAtNanos = System.nanoTime()
+        return file
+    }
+
+    fun close() = fileReceiver.close()
 
     /** Repair request for a stalled incomplete block: its missing source symbols plus the normal margin. */
     fun stallRepairFeedback(sourceBlockNumber: Int): RaptorQBlockFeedback? {

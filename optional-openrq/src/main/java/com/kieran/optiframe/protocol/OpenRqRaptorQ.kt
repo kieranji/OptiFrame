@@ -95,11 +95,13 @@ object OpenRqRaptorQ {
     fun m3ReceiverSession(
         manifest: OptiFrameManifest,
         expectedSessionId: Long,
-        positions: List<P1SlotPosition> = P1SlotPosition.canonicalP1()
+        positions: List<P1SlotPosition> = P1SlotPosition.canonicalP1(),
+        spoolFile: java.io.File? = null
     ): P1M3ReceiverSession = P1M3ReceiverSession(
         manifest = manifest,
         decoderFactory = decoderFactory,
         expectedSessionId = expectedSessionId,
-        positions = positions
+        positions = positions,
+        spoolFile = spoolFile
     )
 }

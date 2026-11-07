@@ -108,7 +108,7 @@ class RaptorQBlockReceiver(
         )
     }
 
-    /** Drops recovered symbol buffers once the file has been verified and assembled. */
+    /** Drops recovered symbol buffers after the caller has consumed them. */
     fun releaseDecodedData() {
         check(completed) { "Cannot release a block before it is decoded" }
         completedBlock = null

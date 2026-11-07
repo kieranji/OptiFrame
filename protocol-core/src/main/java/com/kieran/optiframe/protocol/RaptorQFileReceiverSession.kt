@@ -1,16 +1,19 @@
 package com.kieran.optiframe.protocol
 
+import java.io.File
 import java.io.OutputStream
 
 /** File-level receiver setup using the supplied block decoder factory. */
 class RaptorQFileReceiverSession(
     manifest: OptiFrameManifest,
-    decoderFactory: RaptorQBlockDecoderFactory
+    decoderFactory: RaptorQBlockDecoderFactory,
+    spoolFile: File? = null
 ) {
     private val lastRepairRequestFrameSequenceByBlock = HashMap<Int, Long>()
     private val receiver = RaptorQFileReceiver(
         manifest = manifest,
-        decoderFactory = decoderFactory
+        decoderFactory = decoderFactory,
+        spoolFile = spoolFile
     )
 
     val isComplete: Boolean
@@ -114,6 +117,10 @@ class RaptorQFileReceiverSession(
     fun finishAndVerify(): ByteArray = receiver.finishAndVerify()
 
     fun finishAndVerify(output: OutputStream) = receiver.finishAndVerify(output)
+
+    fun finishAndVerifySpooledFile(): File = receiver.finishAndVerifySpooledFile()
+
+    fun close() = receiver.close()
 
     fun feedbackFor(
         sourceBlockNumber: Int,

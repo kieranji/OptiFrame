@@ -2,7 +2,6 @@ package com.kieran.optiframe.ui.optical
 
 import androidx.camera.core.ImageProxy
 import java.io.File
-import java.io.FileOutputStream
 import com.kieran.optiframe.protocol.OptiFrameManifest
 import com.kieran.optiframe.protocol.OptiFrameManifestCodec
 import com.kieran.optiframe.protocol.OptiFrameBootstrapPayload
@@ -32,7 +31,11 @@ class P1CameraReceivePipeline(
     )
 
     private val receiver: P1M3ReceiverSession by lazy(LazyThreadSafetyMode.NONE) {
-        OpenRqRaptorQ.m3ReceiverSession(manifest, bootstrap.sessionId)
+        OpenRqRaptorQ.m3ReceiverSession(
+            manifest,
+            bootstrap.sessionId,
+            spoolFile = outputFile?.let { File("${it.path}.part") }
+        )
     }
     private var completedFile: ByteArray? = null
     private var completed = false
@@ -106,16 +109,22 @@ class P1CameraReceivePipeline(
     }
 
     private fun finish() {
-        if (outputFile == null) {
-            completedFile = receiver.finishAndVerifyFile()
-        } else {
-            outputFile.parentFile?.mkdirs()
-            try {
-                FileOutputStream(outputFile, false).use { receiver.finishAndVerifyFile(it) }
-            } catch (error: Exception) {
+        try {
+            if (outputFile == null) {
+                completedFile = receiver.finishAndVerifyFile()
+            } else {
+                val spooledFile = receiver.finishAndVerifySpooledFile()
                 outputFile.delete()
-                throw error
+                if (!spooledFile.renameTo(outputFile)) {
+                    spooledFile.copyTo(outputFile, overwrite = true)
+                    spooledFile.delete()
+                }
             }
+        } catch (error: Exception) {
+            outputFile?.delete()
+            outputFile?.let { File("${it.path}.part").delete() }
+            runCatching { receiver.close() }
+            throw error
         }
         completed = true
         runCatching(onTransferComplete)
