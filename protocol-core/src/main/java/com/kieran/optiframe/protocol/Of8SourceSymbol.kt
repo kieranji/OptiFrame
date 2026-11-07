@@ -1,12 +1,11 @@
 package com.kieran.optiframe.protocol
 
-class Of8SourceSymbol(
+class Of8SourceSymbol private constructor(
     val esi: Int,
-    bytes: ByteArray
+    val bytes: ByteArray,
+    @Suppress("UNUSED_PARAMETER") owned: Unit
 ) {
-
-    val bytes: ByteArray =
-        bytes.copyOf()
+    constructor(esi: Int, bytes: ByteArray) : this(esi, bytes.copyOf(), Unit)
 
     init {
         require(esi >= 0) {
@@ -20,5 +19,11 @@ class Of8SourceSymbol(
             "OF8 source symbol must contain exactly " +
                     "${ProtocolConstants.OF8_SOURCE_SYMBOL_BYTES} bytes"
         }
+    }
+
+    companion object {
+        /** Takes ownership of a freshly allocated symbol buffer. */
+        internal fun takeOwnership(esi: Int, bytes: ByteArray): Of8SourceSymbol =
+            Of8SourceSymbol(esi, bytes, Unit)
     }
 }

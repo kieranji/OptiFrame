@@ -5,7 +5,7 @@ object GlobalHeaderMatrixCodec {
     private val FIXED_TRAILER =
         intArrayOf(
             1, 0, 1, 0,
-            1, 0, 1, 0
+            0, 1, 0, 1
         )
 
     fun encode(

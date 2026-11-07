@@ -88,7 +88,7 @@ class GlobalHeaderMatrixCodecTest {
     }
 
     @Test
-    fun fixedTrailerMatchesPc006() {
+    fun fixedTrailerMatchesApprovedPc007V1() {
 
         val matrix =
             GlobalHeaderMatrixCodec.encode(
@@ -98,7 +98,7 @@ class GlobalHeaderMatrixCodecTest {
         assertContentEquals(
             intArrayOf(
                 1, 0, 1, 0,
-                1, 0, 1, 0
+                0, 1, 0, 1
             ),
             matrix.cells.copyOfRange(
                 248,

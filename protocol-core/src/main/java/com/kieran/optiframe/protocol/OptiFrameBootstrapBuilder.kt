@@ -4,6 +4,30 @@ object OptiFrameBootstrapBuilder {
 
     fun build(
         sessionId: Long,
+        fileSize: Long,
+        fileSha256: ByteArray,
+        manifest: OptiFrameManifest,
+        capabilityFlags: Long,
+        controlEndpoint: ByteArray = ByteArray(0)
+    ): OptiFrameBootstrapPayload {
+        require(fileSize >= 0 && manifest.fileSize == fileSize) {
+            "Manifest file size does not match actual file"
+        }
+        require(fileSha256.size == 32 && fileSha256.contentEquals(manifest.fileSha256)) {
+            "Manifest SHA-256 does not match actual file"
+        }
+        return OptiFrameBootstrapPayload(
+            sessionId = sessionId,
+            fileSize = fileSize.toULong(),
+            fileSha256 = fileSha256.copyOf(),
+            manifestHash = OptiFrameManifestCodec.hash(manifest),
+            capabilityFlags = capabilityFlags,
+            controlEndpoint = controlEndpoint
+        )
+    }
+
+    fun build(
+        sessionId: Long,
         fileBytes: ByteArray,
         manifest: OptiFrameManifest,
         capabilityFlags: Long,
