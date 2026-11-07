@@ -444,11 +444,14 @@ private fun SenderHome(
         } else null
     }
     LaunchedEffect(receivePipeline) {
-        val result = receivePipeline?.finishIfComplete()
+        val outcome = runCatching { receivePipeline?.finishIfComplete() }
+        val result = outcome.getOrNull()
         if (result != null && verifiedFile == null) {
             verifiedFile = receiveFile
             receiveMetrics = result.metrics
             cameraStatus = "SHA-256 verified · ${importedManifest?.fileSize ?: 0} bytes received."
+        } else outcome.exceptionOrNull()?.let {
+            cameraStatus = "Receiver error: ${it.message ?: "invalid session"}"
         }
     }
 
