@@ -471,6 +471,7 @@ private fun SenderHome(
         }
     }
     LaunchedEffect(receivePipeline) {
+        threeAControlRef.get()?.unlock()
         if (receivePipeline != null) {
             threeAStatus = threeAControlRef.get()?.applyFrameRate(receiverFast60) ?: "camera not ready"
         }
