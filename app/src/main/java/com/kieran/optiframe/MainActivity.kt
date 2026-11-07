@@ -570,7 +570,13 @@ private fun SenderHome(
                             threeAStatus = it.applyFrameRate(receiverFast60)
                         }
                     }
-                    when (threeAPolicy.onFrame(anchorsLocked, System.nanoTime())) {
+                    when (
+                        threeAPolicy.onFrame(
+                            anchorsLocked,
+                            threeAControlRef.get()?.meteringConverged == true,
+                            System.nanoTime()
+                        )
+                    ) {
                         P1ThreeALockPolicy.Action.METER -> anchors?.let { points ->
                             val centerX = (
                                 points.topLeftX + points.topRightX +

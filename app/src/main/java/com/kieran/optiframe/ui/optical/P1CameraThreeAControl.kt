@@ -13,6 +13,8 @@ import androidx.camera.core.CameraInfo
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.view.LifecycleCameraController
+import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicLong
 
 @OptIn(markerClass = [ExperimentalCamera2Interop::class])
 class P1CameraThreeAControl(
@@ -22,6 +24,12 @@ class P1CameraThreeAControl(
 
     @Volatile
     private var fpsRange: Range<Int>? = null
+
+    @Volatile
+    var meteringConverged: Boolean = false
+        private set
+
+    private val meteringGeneration = AtomicLong()
 
     fun applyFrameRate(fast60: Boolean): String {
         val camera = cameraState() ?: return "camera not ready"
@@ -47,6 +55,8 @@ class P1CameraThreeAControl(
     }
 
     fun meter(imageWidth: Int, imageHeight: Int, centerX: Double, centerY: Double) {
+        val generation = meteringGeneration.incrementAndGet()
+        meteringConverged = false
         val camera = cameraState() ?: return
         runCatching {
             val point = SurfaceOrientedMeteringPointFactory(
@@ -56,7 +66,12 @@ class P1CameraThreeAControl(
                 point,
                 FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB
             ).disableAutoCancel().build()
-            camera.control.startFocusAndMetering(action)
+            camera.control.startFocusAndMetering(action).addListener(
+                Runnable {
+                    if (meteringGeneration.get() == generation) meteringConverged = true
+                },
+                Executor { it.run() }
+            )
         }
     }
 
@@ -85,6 +100,8 @@ class P1CameraThreeAControl(
     }
 
     fun unlock() {
+        meteringGeneration.incrementAndGet()
+        meteringConverged = false
         val camera = cameraState() ?: return
         runCatching {
             camera.control.cancelFocusAndMetering()

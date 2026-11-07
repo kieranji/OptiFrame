@@ -2,7 +2,8 @@ package com.kieran.optiframe.ui.optical
 
 internal class P1ThreeALockPolicy(
     private val meterToLockNanos: Long = DEFAULT_METER_TO_LOCK_NANOS,
-    private val lossToUnlockNanos: Long = DEFAULT_LOSS_TO_UNLOCK_NANOS
+    private val lossToUnlockNanos: Long = DEFAULT_LOSS_TO_UNLOCK_NANOS,
+    private val maxMeteringNanos: Long = DEFAULT_MAX_METERING_NANOS
 ) {
     enum class State { IDLE, METERING, LOCKED }
     enum class Action { NONE, METER, LOCK, UNLOCK }
@@ -17,10 +18,15 @@ internal class P1ThreeALockPolicy(
     init {
         require(meterToLockNanos > 0L)
         require(lossToUnlockNanos > 0L)
+        require(maxMeteringNanos >= meterToLockNanos)
     }
 
     @Synchronized
-    fun onFrame(anchorsLocked: Boolean, nowNanos: Long): Action = when (state) {
+    fun onFrame(
+        anchorsLocked: Boolean,
+        meteringConverged: Boolean,
+        nowNanos: Long
+    ): Action = when (state) {
         State.IDLE -> if (anchorsLocked) {
             state = State.METERING
             meteringSinceNanos = nowNanos
@@ -34,12 +40,18 @@ internal class P1ThreeALockPolicy(
                 meteringSinceNanos = null
                 Action.NONE
             }
-            nowNanos - checkNotNull(meteringSinceNanos) >= meterToLockNanos -> {
-                state = State.LOCKED
-                meteringSinceNanos = null
-                Action.LOCK
+            else -> {
+                val elapsedNanos = nowNanos - checkNotNull(meteringSinceNanos)
+                if (elapsedNanos >= meterToLockNanos &&
+                    (meteringConverged || elapsedNanos >= maxMeteringNanos)
+                ) {
+                    state = State.LOCKED
+                    meteringSinceNanos = null
+                    Action.LOCK
+                } else {
+                    Action.NONE
+                }
             }
-            else -> Action.NONE
         }
         State.LOCKED -> if (anchorsLocked) {
             lostSinceNanos = null
@@ -66,5 +78,6 @@ internal class P1ThreeALockPolicy(
     companion object {
         const val DEFAULT_METER_TO_LOCK_NANOS: Long = 500_000_000L
         const val DEFAULT_LOSS_TO_UNLOCK_NANOS: Long = 1_000_000_000L
+        const val DEFAULT_MAX_METERING_NANOS: Long = 3_000_000_000L
     }
 }
