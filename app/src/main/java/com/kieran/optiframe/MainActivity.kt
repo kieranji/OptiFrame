@@ -698,10 +698,10 @@ private fun SenderHome(
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
                             cameraStatus.startsWith("Receiving") ||
-                            cameraStatus.startsWith("Waiting for the sender to start")
+                            cameraStatus.startsWith("Waiting for a decodable P1 frame")
                         ) {
                             cameraStatus = if (pipeline.metrics.macroblocksDecoded == 0L) {
-                                "Waiting for the sender to start the optical stream (press Start on the sender)…"
+                                "Waiting for a decodable P1 frame (press Start on the sender if it isn't streaming) · ${error.message ?: "decode failed"}"
                             } else {
                                 "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
                             }
@@ -711,10 +711,10 @@ private fun SenderHome(
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
                             cameraStatus.startsWith("Receiving") ||
-                            cameraStatus.startsWith("Waiting for the sender to start")
+                            cameraStatus.startsWith("Waiting for a decodable P1 frame")
                         ) {
                             cameraStatus = if (pipeline.metrics.macroblocksDecoded == 0L) {
-                                "Waiting for the sender to start the optical stream (press Start on the sender)…"
+                                "Waiting for a decodable P1 frame (press Start on the sender if it isn't streaming) · ${error.message ?: "decode failed"}"
                             } else {
                                 "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
                             }
