@@ -28,7 +28,8 @@ fun P1CameraPreview(
     modifier: Modifier = Modifier,
     onImage: (ImageProxy) -> Unit,
     onAnchorsChanged: (P1PerspectiveSampler.AnchorPoints?) -> Unit,
-    onCalibrationProgress: (Int) -> Unit = {}
+    onCalibrationProgress: (Int) -> Unit = {},
+    onThreeAControl: (P1CameraThreeAControl) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -46,6 +47,8 @@ fun P1CameraPreview(
     val latestOnImage = rememberUpdatedState(onImage)
     val latestOnAnchors = rememberUpdatedState(onAnchorsChanged)
     val latestOnProgress = rememberUpdatedState(onCalibrationProgress)
+    val latestOnThreeAControl = rememberUpdatedState(onThreeAControl)
+    val threeAControl = remember(controller) { P1CameraThreeAControl(controller) }
     val imageTransform = remember { AtomicReference<OutputTransform?>(null) }
     val calibrationPoints = remember { mutableStateListOf<PointF>() }
     val transformFactory = remember {
@@ -57,6 +60,7 @@ fun P1CameraPreview(
 
     DisposableEffect(controller, lifecycleOwner, analyzerExecutor) {
         controller.bindToLifecycle(lifecycleOwner)
+        latestOnThreeAControl.value(threeAControl)
         controller.setImageAnalysisAnalyzer(analyzerExecutor) { image ->
             try {
                 imageTransform.set(transformFactory.getOutputTransform(image))

@@ -56,9 +56,11 @@ import com.kieran.optiframe.ui.optical.P1OpticalDisplay
 import com.kieran.optiframe.ui.optical.P1Safe30DisplayState
 import com.kieran.optiframe.ui.optical.P1CameraPreview
 import com.kieran.optiframe.ui.optical.P1CameraReceivePipeline
+import com.kieran.optiframe.ui.optical.P1CameraThreeAControl
 import com.kieran.optiframe.ui.optical.P1PerspectiveSampler
 import com.kieran.optiframe.ui.optical.P1AnchorDetector
 import com.kieran.optiframe.ui.optical.P1AnchorTracker
+import com.kieran.optiframe.ui.optical.P1ThreeALockPolicy
 import com.kieran.optiframe.ui.optical.P1BootstrapQr
 import com.kieran.optiframe.ui.ble.P1BleControlClient
 import com.kieran.optiframe.ui.ble.P1BleControlServer
@@ -71,6 +73,7 @@ import java.util.Locale
 import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -328,6 +331,12 @@ private fun SenderHome(
         } else null
     }
     val anchorTracker = remember(receivePipeline) { P1AnchorTracker() }
+    val threeAPolicy = remember(receivePipeline) { P1ThreeALockPolicy() }
+    val threeAControlRef = remember { AtomicReference<P1CameraThreeAControl?>(null) }
+    var threeAStatus by remember { mutableStateOf("3A waiting for camera") }
+    val receiverFast60 = importedBootstrap?.let {
+        (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
+    } == true
 
     val m4ReceiverPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (grants.values.all { it }) {
@@ -462,6 +471,10 @@ private fun SenderHome(
         }
     }
     LaunchedEffect(receivePipeline) {
+        threeAControlRef.get()?.unlock()
+        if (receivePipeline != null) {
+            threeAStatus = threeAControlRef.get()?.applyFrameRate(receiverFast60) ?: "camera not ready"
+        }
         val outcome = runCatching { receivePipeline?.finishIfComplete() }
         val result = outcome.getOrNull()
         if (result != null && verifiedFile == null) {
@@ -478,8 +491,18 @@ private fun SenderHome(
         Column(modifier = Modifier.fillMaxSize()) {
             P1CameraPreview(
                 modifier = Modifier.weight(1f),
+                onThreeAControl = { control ->
+                    threeAControlRef.set(control)
+                    if (receivePipeline != null) {
+                        threeAStatus = control.applyFrameRate(receiverFast60)
+                    }
+                },
                 onAnchorsChanged = { anchors ->
-                    if (anchors == null) anchorTracker.reset()
+                    if (anchors == null) {
+                        anchorTracker.reset()
+                        threeAPolicy.reset()
+                        threeAControlRef.get()?.unlock()
+                    }
                     calibratedAnchors = anchors
                     cameraStatus = if (anchors == null) "Tap the four corner-anchor centers clockwise, starting at top-left."
                     else "Geometry calibrated; align and hold the optical frame steady."
@@ -540,6 +563,41 @@ private fun SenderHome(
                 }
                 val usingAuto = manualAnchors == null && autoDetection != null
                 val anchors = manualAnchors ?: autoDetection?.anchors
+                if (pipeline != null && verifiedFile == null) {
+                    val anchorsLocked = manualAnchors != null || anchorTracker.isLocked
+                    if (threeAStatus == "camera not ready") {
+                        threeAControlRef.get()?.let {
+                            threeAStatus = it.applyFrameRate(receiverFast60)
+                        }
+                    }
+                    when (
+                        threeAPolicy.onFrame(
+                            anchorsLocked,
+                            threeAControlRef.get()?.meteringConverged == true,
+                            System.nanoTime()
+                        )
+                    ) {
+                        P1ThreeALockPolicy.Action.METER -> anchors?.let { points ->
+                            val centerX = (
+                                points.topLeftX + points.topRightX +
+                                    points.bottomRightX + points.bottomLeftX
+                                ) / 4.0
+                            val centerY = (
+                                points.topLeftY + points.topRightY +
+                                    points.bottomRightY + points.bottomLeftY
+                                ) / 4.0
+                            threeAControlRef.get()?.meter(image.width, image.height, centerX, centerY)
+                        }
+                        P1ThreeALockPolicy.Action.LOCK -> {
+                            threeAStatus = threeAControlRef.get()?.lock() ?: "camera not ready"
+                        }
+                        P1ThreeALockPolicy.Action.UNLOCK -> {
+                            threeAControlRef.get()?.unlock()
+                            threeAStatus = "3A re-metering"
+                        }
+                        P1ThreeALockPolicy.Action.NONE -> Unit
+                    }
+                }
                 if (pipeline != null && anchors != null && verifiedFile == null) {
                     try {
                         val result = pipeline.accept(image, anchors)
@@ -578,6 +636,7 @@ private fun SenderHome(
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("OptiFrame receiver", color = Color.White)
                 Text(cameraStatus, color = Color.White)
+                Text(threeAStatus, color = Color.White)
                 val m4Control = importedBootstrap?.let {
                     (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
                 } == true
@@ -634,6 +693,8 @@ private fun SenderHome(
                     receiving = false
                     calibratedAnchors = null
                     anchorTracker.reset()
+                    threeAPolicy.reset()
+                    threeAControlRef.get()?.unlock()
                 }) { Text("Stop camera") }
             }
         }
