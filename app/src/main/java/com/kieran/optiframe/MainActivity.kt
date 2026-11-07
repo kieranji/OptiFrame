@@ -285,6 +285,16 @@ private fun SenderHome(
                 bleClient = client
                 runCatching { client.startScan() }
                     .onFailure { bleStatus = "BLE scan could not start: ${it.message ?: "error"}" }
+                if (receivePipeline?.finishIfComplete() != null) {
+                    runCatching {
+                        client.send(
+                            P1ControlMessage.Command(
+                                bootstrap.sessionId,
+                                P1ControlMessage.Action.TRANSFER_COMPLETE
+                            )
+                        )
+                    }
+                }
             }
         } else bleStatus = "Bluetooth scan/connect permissions are required for M4."
     }
