@@ -17,9 +17,11 @@ OptiFrame does **not** compress, transcode, or reinterpret the original file con
 **Status:** Research prototype / protocol implementation  
 **Protocol baseline:** OptiFrame V1 Technical Manual, Draft 0.1  
 **Protocol baseline date:** 2026-08-10  
-**Current development focus:** Pure Kotlin/JVM `protocol-core`
+**Current development focus:** Android P1 SAFE30 and experimental FAST60 sender/receiver integration
 
-The project is currently implementing and validating the protocol entirely in memory before introducing screen rendering or camera capture.
+The current snapshot contains the Kotlin/JVM protocol path and a prototype Android flow for SAFE30 and experimental FAST60 P1 transfers. M3 SAFE30 uses a fixed 20% repair budget without BLE. M4 FAST60 uses a prototype BLE GATT feedback channel for block status, repair requests, and pause/resume/end control. The receiver can export transfer metrics, including mixed-frame drops.
+
+The previous progress export records 128 JVM tests passing and a temporary Android harness compiling earlier protocol/display work. Those results predate this session's changes. The current test and app build commands were attempted with Java 17 and Gradle 9.5, but Gradle fails while compiling generated version-catalog accessors with a Windows `AccessDeniedException` before source compilation. No Android SDK 37 installation or device pair was available, so no optical transfer or performance acceptance run has been performed. See [CONTINUATION_STATUS.md](CONTINUATION_STATUS.md) for details and remaining M3 gates.
 
 Current principle:
 
@@ -37,7 +39,13 @@ bytes
 SHA-256 verification
 ```
 
-CameraX, computer vision, real display timing, BLE control and RaptorQ integration will only be introduced after the in-memory protocol path is verified.
+The Compose display advances SAFE30 frames twice or emits a unique FAST60 frame
+on each VSYNC opportunity. Sender and receiver use cache-backed streaming for
+large files. The camera classifier estimates OF8 colors from frame pilots, uses
+low-confidence cells as erasures, and drops mixed captures detected by
+disagreeing timing/header copies. Four anchors still require manual calibration.
+BLE, VSYNC, exposure behavior, and M3/M4 performance targets need validation on
+devices.
 
 ---
 
@@ -70,7 +78,8 @@ SHA-256
 
 CRC32C and Reed–Solomon protect individual optical macroblocks.
 
-RaptorQ is planned to recover missing macroblocks or frames.
+RaptorQ is used by the current P1 file-session path to recover missing source
+symbols; optical frame loss is handled by continuing the symbol stream.
 
 SHA-256 is the final bit-perfect integrity check.
 
@@ -555,13 +564,20 @@ PC-002 affine spatial permutation
 OF8 RGB palette
 ```
 
-The current major protocol milestone is:
+The current in-memory protocol path now includes:
 
 ```text
-OF8 noiseless in-memory round trip
+OF8 frame-local recovery plus P1 SAFE30/RaptorQ file-session integration
 ```
 
-The next major task is completing the Reed–Solomon decoder with error and erasure correction.
+The PC-007 control-band layout implemented here is the candidate from
+`PC-007-candidate.md`; PC-007 (timing/control-band specification) is still
+unresolved and must not be treated as finalized.
+P1 SAFE30 passes 128 JVM tests, including real OpenRQ repair recovery and
+RGB888-grid-to-file recovery. The Compose P1 display component compiles in an
+isolated Android harness. Camera capture, actual display scheduling, full
+100 MiB 20/20 integrity trials, and fixed-stand 25 cm performance measurements
+remain unverified.
 
 ---
 
@@ -618,6 +634,12 @@ RaptorQ loss recovery
 SAFE30 duplicate-frame handling
 Whole-file SHA-256 round trips
 ```
+
+The previous progress snapshot reported 128 tests passing in a minimal JDK 17
+harness. The fixed-repair scheduler test and Android app changes in this
+snapshot have not been run. In the current environment, the Gradle wrapper
+fails before project configuration because it cannot download Gradle 9.5; the
+full Android build is unverified.
 
 Required file-size tests include:
 
@@ -792,7 +814,9 @@ Nominal unique logical frame rate:
 60 fps
 ```
 
-FAST60 will only be enabled after SAFE30 achieves sufficiently reliable macroblock decoding and acceptable composite-frame rates.
+This snapshot exposes FAST60 as an experimental M4 development option. It is not a release-ready profile; broader use still depends on SAFE30 reliability evidence and acceptable FAST60 composite-frame rates.
+
+With 12 OF8 symbols of 256 bytes per P1 frame, the payload ceiling at 60 unique frames/s is 180 KiB/s (184,320 bytes/s), before camera loss, repair overhead, or other system costs. This is a protocol-derived ceiling, not a measured transfer rate.
 
 ---
 

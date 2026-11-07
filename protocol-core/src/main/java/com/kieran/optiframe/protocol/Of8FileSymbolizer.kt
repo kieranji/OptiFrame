@@ -97,7 +97,7 @@ object Of8FileSymbolizer {
                  * Remaining bytes automatically stay 0x00.
                  */
                 symbols +=
-                    Of8SourceSymbol(
+                    Of8SourceSymbol.takeOwnership(
                         esi = esi,
                         bytes = symbol
                     )
