@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -153,6 +154,9 @@ private fun SenderHome(
 ) {
     var session by remember { mutableStateOf<P1M3SenderSession?>(null) }
     var senderSourceFile by remember { mutableStateOf<File?>(null) }
+    DisposableEffect(Unit) {
+        onDispose { senderSourceFile?.delete() }
+    }
     var fast60Selected by remember { mutableStateOf(false) }
     var bleServer by remember { mutableStateOf<P1BleControlServer?>(null) }
     var bleClient by remember { mutableStateOf<P1BleControlClient?>(null) }
@@ -438,6 +442,14 @@ private fun SenderHome(
                 }
             )
         } else null
+    }
+    LaunchedEffect(receivePipeline) {
+        val result = receivePipeline?.finishIfComplete()
+        if (result != null && verifiedFile == null) {
+            verifiedFile = receiveFile
+            receiveMetrics = result.metrics
+            cameraStatus = "SHA-256 verified · ${importedManifest?.fileSize ?: 0} bytes received."
+        }
     }
 
     val active = session

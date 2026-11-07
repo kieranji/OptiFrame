@@ -72,19 +72,7 @@ class P1CameraReceivePipeline(
         )
         result.feedback?.let(onFeedback)
         if (receiver.isComplete) {
-            if (outputFile == null) {
-                completedFile = receiver.finishAndVerifyFile()
-            } else {
-                outputFile.parentFile?.mkdirs()
-                try {
-                    FileOutputStream(outputFile, false).use { receiver.finishAndVerifyFile(it) }
-                } catch (error: Exception) {
-                    outputFile.delete()
-                    throw error
-                }
-            }
-            completed = true
-            runCatching(onTransferComplete)
+            finish()
         }
         return FrameResult(
             sessionId = bootstrap.sessionId,
@@ -92,6 +80,31 @@ class P1CameraReceivePipeline(
             verified = completed,
             metrics = currentMetrics()
         )
+    }
+
+    /** Completes a zero-source-block (empty) transfer before any frame arrives. */
+    @Synchronized
+    fun finishIfComplete(): FrameResult? {
+        if (completed) return FrameResult(bootstrap.sessionId, completedFile, true, currentMetrics())
+        if (!receiver.isComplete) return null
+        finish()
+        return FrameResult(bootstrap.sessionId, completedFile, true, currentMetrics())
+    }
+
+    private fun finish() {
+        if (outputFile == null) {
+            completedFile = receiver.finishAndVerifyFile()
+        } else {
+            outputFile.parentFile?.mkdirs()
+            try {
+                FileOutputStream(outputFile, false).use { receiver.finishAndVerifyFile(it) }
+            } catch (error: Exception) {
+                outputFile.delete()
+                throw error
+            }
+        }
+        completed = true
+        runCatching(onTransferComplete)
     }
 
     private fun currentMetrics(): P1M3TransferMetrics {
