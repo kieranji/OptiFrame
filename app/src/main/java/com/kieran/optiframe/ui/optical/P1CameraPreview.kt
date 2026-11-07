@@ -12,10 +12,13 @@ import androidx.camera.view.transform.ImageProxyTransformFactory
 import androidx.camera.view.transform.OutputTransform
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -65,6 +68,15 @@ fun P1CameraPreview(
     val threeAControl = remember(controller) { P1CameraThreeAControl(controller) }
     val imageTransform = remember { AtomicReference<OutputTransform?>(null) }
     val calibrationPoints = remember { mutableStateListOf<PointF>() }
+    val orientation = LocalConfiguration.current.orientation
+    val lastOrientation = remember { mutableIntStateOf(orientation) }
+    LaunchedEffect(orientation) {
+        if (lastOrientation.intValue != orientation) {
+            lastOrientation.intValue = orientation
+            calibrationPoints.clear()
+            latestOnAnchors.value(null)
+        }
+    }
     val transformFactory = remember {
         ImageProxyTransformFactory().apply {
             setUsingCropRect(false)
