@@ -12,6 +12,10 @@ internal class P1AnchorTracker(
     private var locked: P1AnchorDetector.Detection? = null
     private var consecutiveDecodeFailures = 0
 
+    @get:Synchronized
+    val isLocked: Boolean
+        get() = locked != null
+
     init {
         require(maxConsecutiveDecodeFailures > 0)
     }
