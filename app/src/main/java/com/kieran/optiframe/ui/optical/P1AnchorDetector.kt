@@ -105,6 +105,7 @@ object P1AnchorDetector {
                         val evaluated = runCatching {
                             refineDetection(luma, threshold, quad)
                         }.getOrNull() ?: continue
+                        if (!passesAcceptance(evaluated)) continue
                         val previous = best?.detection
                         if (previous == null || evaluated.inliers > previous.inliers ||
                             (evaluated.inliers == previous.inliers &&
@@ -116,10 +117,11 @@ object P1AnchorDetector {
                 }
             }
         }
-        return best?.detection?.takeIf {
-            it.inliers >= 28 && it.p95ErrorCells <= MAX_P95_ERROR_CELLS
-        }
+        return best?.detection
     }
+
+    private fun passesAcceptance(detection: Detection): Boolean =
+        detection.inliers >= 28 && detection.p95ErrorCells <= MAX_P95_ERROR_CELLS
 
     /** Fits canonical-to-image H by normalized least squares; the returned H has h[8] = 1. */
     internal fun fitHomography(
