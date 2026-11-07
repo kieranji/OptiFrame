@@ -15,6 +15,7 @@ class RaptorQFileReceiver(
     private val blockReceivers: List<RaptorQBlockReceiver>
     private val originalByteCounts: IntArray
     private val blockFileOffsets: LongArray
+    private val spooledBlocks: BooleanArray
     private var verifiedFile: ByteArray? = null
     private var verifiedToStream = false
     private var spoolRandomAccessFile: RandomAccessFile? = null
@@ -56,6 +57,7 @@ class RaptorQFileReceiver(
                 decoder = decoder
             )
         }
+        spooledBlocks = BooleanArray(blockReceivers.size)
         spoolFile?.let { file ->
             file.parentFile?.mkdirs()
             spoolRandomAccessFile = RandomAccessFile(file, "rw").apply { setLength(0L) }
@@ -78,6 +80,8 @@ class RaptorQFileReceiver(
     val decodedBlocksInMemory: Int
         get() = blockReceivers.count { it.decodedSourceBlock != null }
 
+    internal var spoolWriteFailureForTest: (() -> Unit)? = null
+
     fun isBlockComplete(sourceBlockNumber: Int): Boolean {
         require(sourceBlockNumber in blockReceivers.indices)
         return blockReceivers[sourceBlockNumber].isComplete
@@ -97,12 +101,13 @@ class RaptorQFileReceiver(
         require(item.sourceBlockNumber in blockReceivers.indices) {
             "Source block ${item.sourceBlockNumber} is outside the manifest"
         }
-        val result = blockReceivers[item.sourceBlockNumber].accept(item)
-        if (spoolFile != null &&
-            result.disposition == RaptorQBlockReceiveResult.Disposition.BLOCK_COMPLETE
-        ) {
-            spoolDecodedBlock(item.sourceBlockNumber, checkNotNull(result.decodedBlock))
-            blockReceivers[item.sourceBlockNumber].releaseDecodedData()
+        val blockNumber = item.sourceBlockNumber
+        val blockReceiver = blockReceivers[blockNumber]
+        val result = blockReceiver.accept(item)
+        if (spoolFile != null && blockReceiver.isComplete && !spooledBlocks[blockNumber]) {
+            spoolDecodedBlock(blockNumber, checkNotNull(blockReceiver.decodedSourceBlock))
+            spooledBlocks[blockNumber] = true
+            blockReceiver.releaseDecodedData()
         }
         return result
     }
@@ -188,6 +193,13 @@ class RaptorQFileReceiver(
         val file = checkNotNull(spoolFile) { "Spooling is not configured" }
         verifiedSpooledFile?.let { return it }
         check(isComplete) { "Not all source blocks have been decoded" }
+        blockReceivers.forEachIndexed { blockNumber, receiver ->
+            if (receiver.isComplete && !spooledBlocks[blockNumber]) {
+                spoolDecodedBlock(blockNumber, checkNotNull(receiver.decodedSourceBlock))
+                spooledBlocks[blockNumber] = true
+                receiver.releaseDecodedData()
+            }
+        }
         val randomAccessFile = checkNotNull(spoolRandomAccessFile) {
             "Spool file is already closed"
         }
@@ -222,6 +234,7 @@ class RaptorQFileReceiver(
     }
 
     private fun spoolDecodedBlock(blockNumber: Int, decoded: RaptorQDecodedSourceBlock) {
+        spoolWriteFailureForTest?.invoke()
         require(decoded.sourceBlockNumber == blockNumber)
         require(decoded.k == manifest.sourceBlockKValues[blockNumber]) {
             "Decoded K for source block $blockNumber does not match the manifest"
