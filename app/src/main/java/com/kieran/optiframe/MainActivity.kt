@@ -1,5 +1,6 @@
 package com.kieran.optiframe
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import android.net.Uri
@@ -563,9 +564,9 @@ private fun SenderHome(
 
     val active = session
     if (receiving) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             P1CameraPreview(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
                 onThreeAControl = { control ->
                     threeAControlRef.set(control)
                     if (receivePipeline != null) {
