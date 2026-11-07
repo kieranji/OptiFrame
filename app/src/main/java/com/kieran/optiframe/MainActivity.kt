@@ -335,7 +335,7 @@ private fun SenderHome(
                 bleClient = client
                 runCatching { client.startScan() }
                     .onFailure { bleStatus = "BLE scan could not start: ${it.message ?: "error"}" }
-                if (receivePipeline?.finishIfComplete() != null) {
+                if (runCatching { receivePipeline?.finishIfComplete() }.getOrNull() != null) {
                     runCatching {
                         client.send(
                             P1ControlMessage.Command(
