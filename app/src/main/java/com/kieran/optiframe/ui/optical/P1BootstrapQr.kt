@@ -7,6 +7,7 @@ import com.google.zxing.BinaryBitmap
 import com.google.zxing.EncodeHintType
 import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
+import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeWriter
@@ -33,19 +34,37 @@ object P1BootstrapQr {
 
     /** Called while scanning bootstrap only; avoids QR work during optical frame reception. */
     fun scan(image: ImageProxy): OptiFrameBootstrapPayload? {
-        if (image.planes.size != 1) return null
-        val plane = image.planes[0]
-        val buffer = plane.buffer.duplicate()
-        val rgb = IntArray(image.width * image.height)
-        for (y in 0 until image.height) for (x in 0 until image.width) {
-            val offset = y * plane.rowStride + x * plane.pixelStride
-            if (offset + 2 >= buffer.limit()) return null
-            val red = buffer.get(offset).toInt() and 0xFF
-            val green = buffer.get(offset + 1).toInt() and 0xFF
-            val blue = buffer.get(offset + 2).toInt() and 0xFF
-            rgb[y * image.width + x] = (red shl 16) or (green shl 8) or blue
+        val source = when {
+            image.planes.size == 3 -> {
+                val yPlane = image.planes[0]
+                val buffer = yPlane.buffer.duplicate()
+                val luma = ByteArray(image.width * image.height)
+                for (y in 0 until image.height) for (x in 0 until image.width) {
+                    val offset = y * yPlane.rowStride + x * yPlane.pixelStride
+                    if (offset >= buffer.limit()) return null
+                    luma[y * image.width + x] = buffer.get(offset)
+                }
+                PlanarYUVLuminanceSource(
+                    luma, image.width, image.height,
+                    0, 0, image.width, image.height, false
+                )
+            }
+            image.planes.size == 1 -> {
+                val plane = image.planes[0]
+                val buffer = plane.buffer.duplicate()
+                val rgb = IntArray(image.width * image.height)
+                for (y in 0 until image.height) for (x in 0 until image.width) {
+                    val offset = y * plane.rowStride + x * plane.pixelStride
+                    if (offset + 2 >= buffer.limit()) return null
+                    val red = buffer.get(offset).toInt() and 0xFF
+                    val green = buffer.get(offset + 1).toInt() and 0xFF
+                    val blue = buffer.get(offset + 2).toInt() and 0xFF
+                    rgb[y * image.width + x] = (red shl 16) or (green shl 8) or blue
+                }
+                RGBLuminanceSource(image.width, image.height, rgb)
+            }
+            else -> return null
         }
-        val source = RGBLuminanceSource(image.width, image.height, rgb)
         val reader = MultiFormatReader().apply {
             setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
         }

@@ -35,7 +35,7 @@ fun P1CameraPreview(
     val controller = androidx.compose.runtime.remember(context) {
         LifecycleCameraController(context).apply {
             setImageAnalysisBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            setImageAnalysisOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            setImageAnalysisOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
         }
     }
     val analyzerExecutor: ExecutorService = androidx.compose.runtime.remember {
