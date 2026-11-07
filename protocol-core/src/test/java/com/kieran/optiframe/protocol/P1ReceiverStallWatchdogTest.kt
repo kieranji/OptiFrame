@@ -60,16 +60,17 @@ class P1ReceiverStallWatchdogTest {
     }
 
     @Test
-    fun stopsAfterMaximumRequestsUntilProgressResumes() {
-        val watchdog = P1ReceiverStallWatchdog(maxRequestsPerStall = 2)
+    fun keepsRequestingUntilProgressResumes() {
+        val watchdog = P1ReceiverStallWatchdog()
         watchdog.onFrame(0, result(RaptorQBlockReceiveResult.Disposition.DUPLICATE), 0L)
 
-        assertEquals(0, watchdog.poll(1_000_000_000L))
-        assertEquals(0, watchdog.poll(2_000_000_000L))
-        assertNull(watchdog.poll(3_000_000_000L))
-
-        watchdog.onFrame(0, result(RaptorQBlockReceiveResult.Disposition.BLOCK_COMPLETE), 3_100_000_000L)
-        assertEquals(0, watchdog.poll(4_100_000_000L))
+        var nowNanos = 0L
+        repeat(20) {
+            nowNanos += P1ReceiverStallWatchdog.DEFAULT_STALL_TIMEOUT_NANOS
+            assertEquals(0, watchdog.poll(nowNanos))
+            assertNull(watchdog.poll(nowNanos + 500_000_000L))
+            nowNanos += 500_000_000L
+        }
     }
 
     @Test
@@ -95,9 +96,8 @@ class P1ReceiverStallWatchdogTest {
     }
 
     @Test
-    fun constructorRejectsNonPositiveLimits() {
+    fun constructorRejectsNonPositiveTimeout() {
         assertFailsWith<IllegalArgumentException> { P1ReceiverStallWatchdog(stallTimeoutNanos = 0L) }
-        assertFailsWith<IllegalArgumentException> { P1ReceiverStallWatchdog(maxRequestsPerStall = 0) }
     }
 
     private fun result(
