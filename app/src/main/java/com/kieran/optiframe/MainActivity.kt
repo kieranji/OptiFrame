@@ -376,6 +376,7 @@ private fun SenderHome(
     val threeAControlRef = remember { AtomicReference<P1CameraThreeAControl?>(null) }
     var threeAStatus by remember { mutableStateOf("3A waiting for camera") }
     var diagnosticsLine by remember { mutableStateOf("Diagnostics: waiting for anchors") }
+    var diagnosticSaveStatus by remember { mutableStateOf<String?>(null) }
     var lastDecodeError by remember { mutableStateOf("none") }
     val receiverFast60 = importedBootstrap?.let {
         (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
@@ -544,9 +545,9 @@ private fun SenderHome(
     ) { uri ->
         val archive = diagnosticArchiveRef.getAndSet(null)
         if (uri == null) {
-            cameraStatus = "Diagnostic save cancelled."
+            diagnosticSaveStatus = "Diagnostic save cancelled."
         } else if (archive == null) {
-            cameraStatus = "Diagnostic save failed: captured frame is unavailable."
+            diagnosticSaveStatus = "Diagnostic save failed: captured frame is unavailable."
         } else {
             scope.launch {
                 try {
@@ -555,9 +556,9 @@ private fun SenderHome(
                             ?: error("Could not open the diagnostic archive")
                         output.use { archive.writeTo(it) }
                     }
-                    cameraStatus = "Diagnostic saved"
+                    diagnosticSaveStatus = "Diagnostic saved"
                 } catch (error: Exception) {
-                    cameraStatus = "Diagnostic save failed: ${error.message ?: "unknown error"}"
+                    diagnosticSaveStatus = "Diagnostic save failed: ${error.message ?: "unknown error"}"
                 }
             }
         }
@@ -797,7 +798,7 @@ private fun SenderHome(
                     if (captureResult.isSuccess) {
                         diagnosticArchiveRef.set(captureResult.getOrThrow())
                         scope.launch(Dispatchers.Main) {
-                            cameraStatus = "Diagnostic captured; choose a save location."
+                            diagnosticSaveStatus = "Diagnostic captured; choose a save location."
                             diagnosticArchiveSaver.launch(
                                 "optiframe-diag-${System.currentTimeMillis()}.zip"
                             )
@@ -805,7 +806,7 @@ private fun SenderHome(
                     } else {
                         val error = captureResult.exceptionOrNull()
                         scope.launch(Dispatchers.Main) {
-                            cameraStatus = "Diagnostic capture failed: ${error?.message ?: "unknown error"}"
+                            diagnosticSaveStatus = "Diagnostic capture failed: ${error?.message ?: "unknown error"}"
                         }
                     }
                 }
@@ -874,7 +875,10 @@ private fun SenderHome(
                 Text("OptiFrame receiver", color = Color.White)
                 Text(cameraStatus, color = Color.White)
                 Text(threeAStatus, color = Color.White)
-                if (BuildConfig.DEBUG) Text(diagnosticsLine, color = Color.White)
+                if (BuildConfig.DEBUG) {
+                    Text(diagnosticsLine, color = Color.White)
+                    diagnosticSaveStatus?.let { Text(it, color = Color.White) }
+                }
                 val m4Control = importedBootstrap?.let {
                     (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
                 } == true
@@ -938,7 +942,7 @@ private fun SenderHome(
                             enabled = !diagnosticCaptureArmed.get(),
                             onClick = {
                                 diagnosticCaptureArmed.set(true)
-                                cameraStatus = "Diagnostic capture armed; waiting for the next frame."
+                                diagnosticSaveStatus = "Diagnostic capture armed; waiting for the next frame."
                             }
                         ) { Text("Save diagnostic frame") }
                     }
