@@ -13,14 +13,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -40,6 +43,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.kieran.optiframe.acceptance.P1AcceptanceChecklist
+import com.kieran.optiframe.acceptance.P1AcceptancePreset
+import com.kieran.optiframe.acceptance.P1AcceptanceRecord
+import com.kieran.optiframe.acceptance.P1AcceptanceStore
 import com.kieran.optiframe.protocol.OptiFrameGlobalHeader
 import com.kieran.optiframe.protocol.OptiFrameManifest
 import com.kieran.optiframe.protocol.OptiFrameManifestCodec
@@ -192,6 +199,18 @@ private fun SenderHome(
     val qrFrameCounter = remember { AtomicInteger(0) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val acceptanceStore = remember(context) { P1AcceptanceStore(context) }
+    var acceptanceRecords by remember(acceptanceStore) {
+        mutableStateOf(acceptanceStore.all())
+    }
+    var acceptancePreset by remember(acceptanceStore) {
+        mutableStateOf(acceptanceStore.preset())
+    }
+    val recordedAcceptancePipelines = remember {
+        java.util.Collections.newSetFromMap(
+            java.util.WeakHashMap<P1CameraReceivePipeline, Boolean>()
+        )
+    }
     val currentBleClient by rememberUpdatedState(bleClient)
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -347,6 +366,32 @@ private fun SenderHome(
     val receiverFast60 = importedBootstrap?.let {
         (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
     } == true
+    fun recordAcceptance(
+        pipeline: P1CameraReceivePipeline,
+        metrics: P1M3TransferMetrics,
+        firstMinuteKibPerSecond: Double?,
+        lastMinuteKibPerSecond: Double?
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val firstRecord = synchronized(recordedAcceptancePipelines) {
+            recordedAcceptancePipelines.add(pipeline)
+        }
+        if (!firstRecord) return
+        acceptanceStore.add(
+            P1AcceptanceRecord(
+                fast60 = receiverFast60,
+                fileSizeBytes = importedManifest?.fileSize ?: metrics.verifiedFileBytes ?: 0L,
+                sha256Verified = metrics.sha256Verified && !pipeline.verificationFailed,
+                goodputKibPerSecond = metrics.goodputKibPerSecond,
+                macroblockPassRate = metrics.macroblockPassRate,
+                elapsedMillis = metrics.elapsedMillis,
+                firstMinuteKibPerSecond = firstMinuteKibPerSecond,
+                lastMinuteKibPerSecond = lastMinuteKibPerSecond
+            )
+        )
+        val updatedRecords = acceptanceStore.all()
+        scope.launch { acceptanceRecords = updatedRecords }
+    }
 
     val m4ReceiverPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (grants.values.all { it }) {
@@ -487,11 +532,29 @@ private fun SenderHome(
         }
         val outcome = runCatching { receivePipeline?.finishIfComplete() }
         val result = outcome.getOrNull()
-        if (result != null && verifiedFile == null) {
-            verifiedFile = receiveFile
-            receiveMetrics = result.metrics
-            cameraStatus = "SHA-256 verified · ${importedManifest?.fileSize ?: 0} bytes received."
+        if (result?.verified == true) {
+            receivePipeline?.let {
+                recordAcceptance(
+                    it,
+                    result.metrics,
+                    result.firstMinuteKibPerSecond,
+                    result.lastMinuteKibPerSecond
+                )
+            }
+            if (verifiedFile == null) {
+                verifiedFile = receiveFile
+                receiveMetrics = result.metrics
+                cameraStatus = "SHA-256 verified · ${importedManifest?.fileSize ?: 0} bytes received."
+            }
         } else outcome.exceptionOrNull()?.let {
+            receivePipeline?.takeIf { pipeline -> pipeline.verificationFailed }?.let { pipeline ->
+                recordAcceptance(
+                    pipeline,
+                    pipeline.metrics,
+                    pipeline.firstMinuteKibPerSecond,
+                    pipeline.lastMinuteKibPerSecond
+                )
+            }
             cameraStatus = "Receiver error: ${it.message ?: "invalid session"}"
         }
     }
@@ -613,6 +676,12 @@ private fun SenderHome(
                         val result = pipeline.accept(image, anchors)
                         if (usingAuto) anchorTracker.onDecodeResult(true)
                         if (result.verified) {
+                            recordAcceptance(
+                                pipeline,
+                                result.metrics,
+                                result.firstMinuteKibPerSecond,
+                                result.lastMinuteKibPerSecond
+                            )
                             verifiedFile = receiveFile
                             receiveMetrics = result.metrics
                             cameraStatus = "SHA-256 verified · ${importedManifest?.fileSize ?: 0} bytes received."
@@ -638,6 +707,14 @@ private fun SenderHome(
                             cameraStatus = "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
                         }
                     } catch (error: IllegalStateException) {
+                        if (pipeline.verificationFailed) {
+                            recordAcceptance(
+                                pipeline,
+                                pipeline.metrics,
+                                pipeline.firstMinuteKibPerSecond,
+                                pipeline.lastMinuteKibPerSecond
+                            )
+                        }
                         cameraStatus = "Receiver error: ${error.message ?: "invalid session"}"
                     }
                 }
@@ -801,6 +878,20 @@ private fun SenderHome(
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
                     ) { Text("Receive") }
                 }
+                if (BuildConfig.DEBUG) {
+                    P1AcceptanceChecklistCard(
+                        records = acceptanceRecords,
+                        preset = acceptancePreset,
+                        onPresetChange = { selected ->
+                            acceptanceStore.setPreset(selected)
+                            acceptancePreset = selected
+                        },
+                        onReset = {
+                            acceptanceStore.clear()
+                            acceptanceRecords = emptyList()
+                        }
+                    )
+                }
                 when (homeMode) {
                     HomeMode.SEND -> {
                         Text(status, modifier = Modifier.padding(vertical = 16.dp))
@@ -844,6 +935,54 @@ private fun SenderHome(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun P1AcceptanceChecklistCard(
+    records: List<P1AcceptanceRecord>,
+    preset: P1AcceptancePreset,
+    onPresetChange: (P1AcceptancePreset) -> Unit,
+    onReset: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text("Test build · V1 acceptance", style = MaterialTheme.typography.titleSmall)
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                SegmentedButton(
+                    selected = preset == P1AcceptancePreset.DEMO,
+                    onClick = { onPresetChange(P1AcceptancePreset.DEMO) },
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                ) { Text("Demo") }
+                SegmentedButton(
+                    selected = preset == P1AcceptancePreset.FULL,
+                    onClick = { onPresetChange(P1AcceptancePreset.FULL) },
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                ) { Text("Full") }
+            }
+            Text(preset.label, style = MaterialTheme.typography.bodySmall)
+            P1AcceptanceChecklist.evaluate(records, preset).forEach { item ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when (item.passed) {
+                            true -> "✓"
+                            false -> "✗"
+                            null -> "–"
+                        },
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Text(
+                        "${item.label}  ${item.value}",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+            TextButton(onClick = onReset) { Text("Reset checklist") }
         }
     }
 }
