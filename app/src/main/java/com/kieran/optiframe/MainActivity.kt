@@ -272,6 +272,56 @@ private fun SenderHome(
             picker.launch(arrayOf("*/*"))
         } else status = "Bluetooth advertise/connect permissions are required for M4."
     }
+    val receiveFile = remember(importedManifest, importedBootstrap) {
+        val bootstrap = importedBootstrap
+        bootstrap?.let { File(context.cacheDir, "optiframe-${it.sessionId}.received") }
+    }
+    val receivePipeline = remember(importedManifest, importedBootstrap, receiveFile) {
+        val manifest = importedManifest
+        val bootstrap = importedBootstrap
+        val outputFile = receiveFile
+        if (manifest != null && bootstrap != null && outputFile != null) {
+            outputFile.delete()
+            val m4Control = (bootstrap.capabilityFlags and
+                OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
+            P1CameraReceivePipeline(
+                manifest = manifest,
+                bootstrap = bootstrap,
+                onFeedback = { feedback ->
+                    if (m4Control) {
+                        val message = if (feedback.blockDecoded) {
+                            P1ControlMessage.BlockDecoded(
+                                bootstrap.sessionId,
+                                feedback.sourceBlockNumber,
+                                feedback.uniqueSymbolsReceived
+                            )
+                        } else {
+                            P1ControlMessage.RepairRequested(
+                                bootstrap.sessionId,
+                                feedback.sourceBlockNumber,
+                                feedback.additionalRepairSymbols,
+                                feedback.uniqueSymbolsReceived
+                            )
+                        }
+                        runCatching { currentBleClient?.send(message) }
+                    }
+                },
+                outputFile = outputFile,
+                requestRepairsOnlyOnSlotFailures = m4Control,
+                onTransferComplete = {
+                    if (m4Control) runCatching {
+                        currentBleClient?.send(
+                            P1ControlMessage.Command(
+                                bootstrap.sessionId,
+                                P1ControlMessage.Action.TRANSFER_COMPLETE
+                            )
+                        )
+                    }
+                }
+            )
+        } else null
+    }
+
     val m4ReceiverPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (grants.values.all { it }) {
             val bootstrap = importedBootstrap
@@ -403,55 +453,6 @@ private fun SenderHome(
                 cameraStatus = "Benchmark report failed: ${error.message ?: "unknown error"}"
             }
         }
-    }
-    val receiveFile = remember(importedManifest, importedBootstrap) {
-        val bootstrap = importedBootstrap
-        bootstrap?.let { File(context.cacheDir, "optiframe-${it.sessionId}.received") }
-    }
-    val receivePipeline = remember(importedManifest, importedBootstrap, receiveFile) {
-        val manifest = importedManifest
-        val bootstrap = importedBootstrap
-        val outputFile = receiveFile
-        if (manifest != null && bootstrap != null && outputFile != null) {
-            outputFile.delete()
-            val m4Control = (bootstrap.capabilityFlags and
-                OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
-            P1CameraReceivePipeline(
-                manifest = manifest,
-                bootstrap = bootstrap,
-                onFeedback = { feedback ->
-                    if (m4Control) {
-                        val message = if (feedback.blockDecoded) {
-                            P1ControlMessage.BlockDecoded(
-                                bootstrap.sessionId,
-                                feedback.sourceBlockNumber,
-                                feedback.uniqueSymbolsReceived
-                            )
-                        } else {
-                            P1ControlMessage.RepairRequested(
-                                bootstrap.sessionId,
-                                feedback.sourceBlockNumber,
-                                feedback.additionalRepairSymbols,
-                                feedback.uniqueSymbolsReceived
-                            )
-                        }
-                        runCatching { currentBleClient?.send(message) }
-                    }
-                },
-                outputFile = outputFile,
-                requestRepairsOnlyOnSlotFailures = m4Control,
-                onTransferComplete = {
-                    if (m4Control) runCatching {
-                        currentBleClient?.send(
-                            P1ControlMessage.Command(
-                                bootstrap.sessionId,
-                                P1ControlMessage.Action.TRANSFER_COMPLETE
-                            )
-                        )
-                    }
-                }
-            )
-        } else null
     }
     LaunchedEffect(receivePipeline) {
         val outcome = runCatching { receivePipeline?.finishIfComplete() }
