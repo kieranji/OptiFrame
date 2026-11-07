@@ -85,6 +85,7 @@ fun P1CameraPreview(
         }
         onDispose {
             controller.clearImageAnalysisAnalyzer()
+            threeAControl.invalidate()
             controller.unbind()
             analyzerExecutor.shutdown()
         }

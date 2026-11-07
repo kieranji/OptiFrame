@@ -12,11 +12,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ImageProxy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -74,6 +77,8 @@ import com.kieran.optiframe.ui.optical.P1CameraThreeAControl
 import com.kieran.optiframe.ui.optical.P1PerspectiveSampler
 import com.kieran.optiframe.ui.optical.P1AnchorDetector
 import com.kieran.optiframe.ui.optical.P1AnchorTracker
+import com.kieran.optiframe.ui.optical.P1ReceiverDiagnosticArchive
+import com.kieran.optiframe.ui.optical.P1ReceiverDiagnostics
 import com.kieran.optiframe.ui.optical.P1ThreeALockPolicy
 import com.kieran.optiframe.ui.optical.P1BootstrapQr
 import com.kieran.optiframe.ui.ble.P1BleControlClient
@@ -86,6 +91,7 @@ import java.util.UUID
 import java.util.Locale
 import java.io.File
 import java.io.FileInputStream
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
@@ -200,6 +206,9 @@ private fun SenderHome(
     var showBootstrapQr by remember { mutableStateOf(false) }
     var bleStatus by remember { mutableStateOf("BLE control is not connected") }
     val qrFrameCounter = remember { AtomicInteger(0) }
+    val diagnosticFrameCounter = remember { AtomicInteger(0) }
+    val diagnosticCaptureArmed = remember { AtomicBoolean(false) }
+    val diagnosticArchiveRef = remember { AtomicReference<P1ReceiverDiagnosticArchive?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val acceptanceStore = remember(context) { P1AcceptanceStore(context) }
@@ -366,6 +375,8 @@ private fun SenderHome(
     val threeAPolicy = remember(receivePipeline) { P1ThreeALockPolicy() }
     val threeAControlRef = remember { AtomicReference<P1CameraThreeAControl?>(null) }
     var threeAStatus by remember { mutableStateOf("3A waiting for camera") }
+    var diagnosticsLine by remember { mutableStateOf("Diagnostics: waiting for anchors") }
+    var lastDecodeError by remember { mutableStateOf("none") }
     val receiverFast60 = importedBootstrap?.let {
         (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
     } == true
@@ -528,6 +539,29 @@ private fun SenderHome(
             }
         }
     }
+    val diagnosticArchiveSaver = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        val archive = diagnosticArchiveRef.getAndSet(null)
+        if (uri == null) {
+            cameraStatus = "Diagnostic save cancelled."
+        } else if (archive == null) {
+            cameraStatus = "Diagnostic save failed: captured frame is unavailable."
+        } else {
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) {
+                        val output = context.contentResolver.openOutputStream(uri)
+                            ?: error("Could not open the diagnostic archive")
+                        output.use { archive.writeTo(it) }
+                    }
+                    cameraStatus = "Diagnostic saved"
+                } catch (error: Exception) {
+                    cameraStatus = "Diagnostic save failed: ${error.message ?: "unknown error"}"
+                }
+            }
+        }
+    }
     LaunchedEffect(receivePipeline) {
         threeAControlRef.get()?.unlock()
         if (receivePipeline != null) {
@@ -615,6 +649,7 @@ private fun SenderHome(
                 }
                 val manualAnchors = calibratedAnchors
                 var autoDetection: P1AnchorDetector.Detection? = null
+                var autoPlaneView: P1PerspectiveSampler.PlaneView? = null
                 if (pipeline != null && verifiedFile == null && manualAnchors == null &&
                     image.planes.size == 3
                 ) {
@@ -625,6 +660,7 @@ private fun SenderHome(
                     val planeView = P1PerspectiveSampler.PlaneView(
                         data, yPlane.rowStride, yPlane.pixelStride, image.width, image.height
                     )
+                    autoPlaneView = planeView
                     autoDetection = anchorTracker.locate(planeView)
                     if (autoDetection != null &&
                         !cameraStatus.startsWith("SHA-256 verified") &&
@@ -646,32 +682,131 @@ private fun SenderHome(
                             threeAStatus = it.applyFrameRate(receiverFast60)
                         }
                     }
-                    when (
-                        threeAPolicy.onFrame(
-                            anchorsLocked,
-                            threeAControlRef.get()?.meteringConverged == true,
-                            System.nanoTime()
-                        )
-                    ) {
-                        P1ThreeALockPolicy.Action.METER -> anchors?.let { points ->
-                            val centerX = (
-                                points.topLeftX + points.topRightX +
-                                    points.bottomRightX + points.bottomLeftX
-                                ) / 4.0
-                            val centerY = (
-                                points.topLeftY + points.topRightY +
-                                    points.bottomRightY + points.bottomLeftY
-                                ) / 4.0
-                            threeAControlRef.get()?.meter(image.width, image.height, centerX, centerY)
+                    val threeAControl = threeAControlRef.get()
+                    fun meterAtAnchors(points: P1PerspectiveSampler.AnchorPoints) {
+                        val centerX = (
+                            points.topLeftX + points.topRightX +
+                                points.bottomRightX + points.bottomLeftX
+                            ) / 4.0
+                        val centerY = (
+                            points.topLeftY + points.topRightY +
+                                points.bottomRightY + points.bottomLeftY
+                            ) / 4.0
+                        threeAControl?.meter(image.width, image.height, centerX, centerY)
+                    }
+                    val threeAAction = threeAPolicy.onFrame(
+                        anchorsLocked,
+                        threeAControl?.meteringConverged == true,
+                        System.nanoTime()
+                    )
+                    when (threeAAction) {
+                        P1ThreeALockPolicy.Action.METER -> anchors?.let(::meterAtAnchors)
+                        P1ThreeALockPolicy.Action.NONE -> {
+                            if (threeAPolicy.state == P1ThreeALockPolicy.State.METERING &&
+                                threeAControl?.meteringStarted != true
+                            ) {
+                                anchors?.let(::meterAtAnchors)
+                            }
                         }
                         P1ThreeALockPolicy.Action.LOCK -> {
-                            threeAStatus = threeAControlRef.get()?.lock() ?: "camera not ready"
+                            threeAStatus = threeAControl?.lock() ?: "camera not ready"
                         }
                         P1ThreeALockPolicy.Action.UNLOCK -> {
-                            threeAControlRef.get()?.unlock()
+                            threeAControl?.unlock()
                             threeAStatus = "3A re-metering"
                         }
-                        P1ThreeALockPolicy.Action.NONE -> Unit
+                    }
+                }
+                val captureDiagnostic = BuildConfig.DEBUG && diagnosticCaptureArmed.getAndSet(false)
+                val anchoredFrameNumber = if (BuildConfig.DEBUG && anchors != null) {
+                    diagnosticFrameCounter.incrementAndGet()
+                } else {
+                    0
+                }
+                var diagnosticGrid: ByteArray? = null
+                var frameDiagnosticsLine = P1ReceiverDiagnostics.line(
+                    image.width,
+                    image.height,
+                    image.imageInfo.rotationDegrees,
+                    anchors,
+                    null,
+                    null
+                )
+                if (BuildConfig.DEBUG && anchors != null &&
+                    (captureDiagnostic || anchoredFrameNumber % 10 == 0)
+                ) {
+                    var sampleError: String? = null
+                    diagnosticGrid = runCatching {
+                        P1PerspectiveSampler.sample(image, anchors)
+                    }.onFailure {
+                        sampleError = it.message ?: "grid sampling failed"
+                    }.getOrNull()
+                    val orientationScore = if (usingAuto && autoDetection != null) {
+                        autoPlaneView?.let { plane ->
+                            runCatching {
+                                P1AnchorDetector.pilotOrientationScore(
+                                    plane, checkNotNull(autoDetection).homography
+                                )
+                            }.getOrNull()
+                        }
+                    } else {
+                        null
+                    }
+                    frameDiagnosticsLine = P1ReceiverDiagnostics.line(
+                        image.width,
+                        image.height,
+                        image.imageInfo.rotationDegrees,
+                        anchors,
+                        diagnosticGrid,
+                        orientationScore,
+                        sampleError
+                    )
+                    diagnosticsLine = frameDiagnosticsLine
+                } else if (captureDiagnostic) {
+                    diagnosticsLine = frameDiagnosticsLine
+                }
+                if (captureDiagnostic) {
+                    val captureResult = runCatching {
+                        val jpeg = P1ReceiverDiagnostics.yuvToJpeg(image)
+                        val gridPng = diagnosticGrid?.let(P1ReceiverDiagnostics::gridToPng)
+                        val anchorPoints = anchors?.let { points ->
+                            "TL=(${points.topLeftX},${points.topLeftY}), " +
+                                "TR=(${points.topRightX},${points.topRightY}), " +
+                                "BR=(${points.bottomRightX},${points.bottomRightY}), " +
+                                "BL=(${points.bottomLeftX},${points.bottomLeftY})"
+                        } ?: "none"
+                        val info = buildString {
+                            appendLine("manufacturer=${Build.MANUFACTURER}")
+                            appendLine("model=${Build.MODEL}")
+                            appendLine("image=${image.width}x${image.height}")
+                            appendLine("rotationDegrees=${image.imageInfo.rotationDegrees}")
+                            appendLine("cameraStatus=$cameraStatus")
+                            appendLine("threeAStatus=$threeAStatus")
+                            appendLine("diagnostics=$frameDiagnosticsLine")
+                            appendLine("anchorPoints=$anchorPoints")
+                            appendLine("manualAnchors=${manualAnchors != null}")
+                            autoDetection?.let {
+                                appendLine("detectionInliers=${it.inliers}")
+                                appendLine("detectionRmsErrorCells=${it.rmsErrorCells}")
+                                appendLine("detectionP95ErrorCells=${it.p95ErrorCells}")
+                            }
+                            appendLine("lastDecodeError=$lastDecodeError")
+                        }
+                        P1ReceiverDiagnosticArchive(jpeg, gridPng, info)
+                    }
+                    if (captureResult.isSuccess) {
+                        diagnosticArchiveRef.set(captureResult.getOrThrow())
+                        scope.launch(Dispatchers.Main) {
+                            cameraStatus = "Diagnostic captured; choose a save location."
+                            diagnosticArchiveSaver.launch(
+                                "optiframe-diag-${System.currentTimeMillis()}.zip"
+                            )
+                        }
+                    } else {
+                        val error = captureResult.exceptionOrNull()
+                        scope.launch(Dispatchers.Main) {
+                            cameraStatus = "Diagnostic capture failed: ${error?.message ?: "unknown error"}"
+                        }
                     }
                 }
                 if (pipeline != null && anchors != null && verifiedFile == null) {
@@ -694,6 +829,7 @@ private fun SenderHome(
                             cameraStatus = "Receiving · ${result.metrics.macroblocksDecoded} macroblocks decoded."
                         }
                     } catch (error: P1CompositeFrameException) {
+                        lastDecodeError = error.message ?: "decode failed"
                         if (usingAuto) anchorTracker.onDecodeResult(true)
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
@@ -707,6 +843,7 @@ private fun SenderHome(
                             }
                         }
                     } catch (error: IllegalArgumentException) {
+                        lastDecodeError = error.message ?: "decode failed"
                         if (usingAuto) anchorTracker.onDecodeResult(false)
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
@@ -737,6 +874,7 @@ private fun SenderHome(
                 Text("OptiFrame receiver", color = Color.White)
                 Text(cameraStatus, color = Color.White)
                 Text(threeAStatus, color = Color.White)
+                if (BuildConfig.DEBUG) Text(diagnosticsLine, color = Color.White)
                 val m4Control = importedBootstrap?.let {
                     (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
                 } == true
@@ -789,13 +927,32 @@ private fun SenderHome(
                         reportSaver.launch("${name}_${if (m4Control) "m4" else "m3"}_report.json")
                     }) { Text("Export JSON benchmark report") }
                 }
-                Button(onClick = {
-                    receiving = false
-                    calibratedAnchors = null
-                    anchorTracker.reset()
-                    threeAPolicy.reset()
-                    threeAControlRef.get()?.unlock()
-                }) { Text("Stop camera") }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (BuildConfig.DEBUG) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = !diagnosticCaptureArmed.get(),
+                            onClick = {
+                                diagnosticCaptureArmed.set(true)
+                                cameraStatus = "Diagnostic capture armed; waiting for the next frame."
+                            }
+                        ) { Text("Save diagnostic frame") }
+                    }
+                    Button(
+                        modifier = Modifier.weight(if (BuildConfig.DEBUG) 1f else 2f),
+                        onClick = {
+                            receiving = false
+                            calibratedAnchors = null
+                            anchorTracker.reset()
+                            threeAPolicy.reset()
+                            threeAControlRef.get()?.unlock()
+                        }
+                    ) { Text("Stop camera") }
+                }
             }
         }
     } else if (active != null) {
@@ -805,22 +962,19 @@ private fun SenderHome(
             view.keepScreenOn = true
             onDispose { view.keepScreenOn = previous }
         }
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.Bottom
-        ) {
+        val transferDisplay: @Composable (Modifier) -> Unit = { displayModifier ->
             if (showBootstrapQr && bootstrapPayload != null) {
                 val qr = remember(bootstrapPayload) { P1BootstrapQr.render(checkNotNull(bootstrapPayload)) }
                 Image(
                     bitmap = qr.asImageBitmap(),
                     contentDescription = "OptiFrame transfer bootstrap QR code",
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    modifier = displayModifier,
                     contentScale = ContentScale.Fit
                 )
             } else {
                 P1OpticalDisplay(
                     session = active,
-                    modifier = Modifier.weight(1f),
+                    modifier = displayModifier,
                     onStateChange = {
                         transferState = it
                         if (it == P1Safe30DisplayState.COMPLETE || it == P1Safe30DisplayState.CANCELLED) {
@@ -830,8 +984,10 @@ private fun SenderHome(
                     }
                 )
             }
+        }
+        val transferControls: @Composable (Modifier) -> Unit = { controlsModifier ->
             Column(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                modifier = controlsModifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text("${active.manifest.fileName} · ${active.progress.completedBlocks}/${active.progress.totalBlocks} blocks", color = Color.White)
@@ -869,6 +1025,27 @@ private fun SenderHome(
                     senderSourceFile?.delete()
                     senderSourceFile = null
                 }) { Text("Stop") }
+            }
+        }
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            if (maxWidth > maxHeight) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    transferDisplay(Modifier.weight(1f).fillMaxHeight())
+                    transferControls(
+                        Modifier.width(220.dp).fillMaxHeight().verticalScroll(rememberScrollState())
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Bottom
+                ) {
+                    transferDisplay(Modifier.weight(1f).fillMaxWidth())
+                    transferControls(Modifier)
+                }
             }
         }
     } else {

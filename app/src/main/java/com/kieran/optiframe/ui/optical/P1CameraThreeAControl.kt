@@ -2,6 +2,8 @@ package com.kieran.optiframe.ui.optical
 
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.os.Handler
+import android.os.Looper
 import android.util.Range
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
@@ -14,6 +16,7 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.view.LifecycleCameraController
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 @OptIn(markerClass = [ExperimentalCamera2Interop::class])
@@ -23,13 +26,29 @@ class P1CameraThreeAControl(
     private data class CameraState(val control: CameraControl, val info: CameraInfo)
 
     @Volatile
+    private var cached: CameraState? = null
+
+    @Volatile
     private var fpsRange: Range<Int>? = null
+
+    @Volatile
+    var meteringStarted: Boolean = false
+        private set
 
     @Volatile
     var meteringConverged: Boolean = false
         private set
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val refreshPending = AtomicBoolean(false)
     private val meteringGeneration = AtomicLong()
+
+    fun invalidate() {
+        cached = null
+        meteringGeneration.incrementAndGet()
+        meteringStarted = false
+        meteringConverged = false
+    }
 
     fun applyFrameRate(fast60: Boolean): String {
         val camera = cameraState() ?: return "camera not ready"
@@ -56,6 +75,7 @@ class P1CameraThreeAControl(
 
     fun meter(imageWidth: Int, imageHeight: Int, centerX: Double, centerY: Double) {
         val generation = meteringGeneration.incrementAndGet()
+        meteringStarted = false
         meteringConverged = false
         val camera = cameraState() ?: return
         runCatching {
@@ -72,6 +92,8 @@ class P1CameraThreeAControl(
                 },
                 Executor { it.run() }
             )
+        }.onSuccess {
+            if (meteringGeneration.get() == generation) meteringStarted = true
         }
     }
 
@@ -101,6 +123,7 @@ class P1CameraThreeAControl(
 
     fun unlock() {
         meteringGeneration.incrementAndGet()
+        meteringStarted = false
         meteringConverged = false
         val camera = cameraState() ?: return
         runCatching {
@@ -112,10 +135,28 @@ class P1CameraThreeAControl(
     }
 
     private fun cameraState(): CameraState? {
-        val control = runCatching { controller.cameraControl }.getOrNull() ?: return null
-        val info = runCatching { controller.cameraInfo }.getOrNull() ?: return null
-        return CameraState(control, info)
+        cached?.let { return it }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return readCameraState()?.also { cached = it }
+        }
+        if (refreshPending.compareAndSet(false, true)) {
+            val posted = mainHandler.post {
+                try {
+                    if (cached == null) cached = readCameraState()
+                } finally {
+                    refreshPending.set(false)
+                }
+            }
+            if (!posted) refreshPending.set(false)
+        }
+        return null
     }
+
+    private fun readCameraState(): CameraState? = runCatching {
+        val control = controller.cameraControl ?: return@runCatching null
+        val info = controller.cameraInfo ?: return@runCatching null
+        CameraState(control, info)
+    }.getOrNull()
 
     private fun captureRequestOptions(range: Range<Int>): CaptureRequestOptions =
         CaptureRequestOptions.Builder()
