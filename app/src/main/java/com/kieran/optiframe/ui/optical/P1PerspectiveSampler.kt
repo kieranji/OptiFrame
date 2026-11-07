@@ -11,6 +11,10 @@ import com.kieran.optiframe.protocol.P1Rgb888GridDecoder
  * average, rather than warping a full 160x96 picture. YUV_420_888 is the
  * preferred input; RGBA_8888 remains supported for compatibility. */
 object P1PerspectiveSampler {
+    @Volatile
+    var lastOutOfImageCells: Int = 0
+        private set
+
     /** Image-space centers of the four PC-007 corner anchors, clockwise. */
     data class AnchorPoints(
         val topLeftX: Double, val topLeftY: Double,
@@ -56,13 +60,22 @@ object P1PerspectiveSampler {
      * tracking should update these points as the camera or display moves.
      */
     fun sample(image: ImageProxy, anchors: AnchorPoints): ByteArray {
-        return when {
+        lastOutOfImageCells = 0
+        val pixels = when {
             image.planes.size == 3 -> sampleYuv420(image, anchors)
             image.planes.size == 1 -> sampleRgba(image, anchors)
             else -> throw IllegalArgumentException(
                 "Unsupported camera image: ${image.planes.size} planes"
             )
         }
+        val cellCount = P1PhysicalLayout.GRID_WIDTH * P1PhysicalLayout.GRID_HEIGHT
+        if (lastOutOfImageCells > cellCount / 4) {
+            throw IllegalArgumentException(
+                "Anchors map $lastOutOfImageCells of $cellCount P1 cells outside the camera image; " +
+                    "move the receiver back so the whole sender screen is visible"
+            )
+        }
+        return pixels
     }
 
     /** YUV_420_888 path (manual 14.4/18.3): bilinear sampling on raw planes. */
@@ -79,15 +92,17 @@ object P1PerspectiveSampler {
                 var luma = 0.0
                 var cb = 0.0
                 var cr = 0.0
+                var cellOutOfImage = false
                 for (dy in CELL_OFFSETS) for (dx in CELL_OFFSETS) {
                     val (x, y) = map(h, column + 0.5 + dx, row + 0.5 + dy)
-                    require(x >= 0.0 && x < image.width && y >= 0.0 && y < image.height) {
-                        "Calibration maps P1 cell ($column,$row) outside the camera image"
+                    if (x < 0.0 || x >= image.width || y < 0.0 || y >= image.height) {
+                        cellOutOfImage = true
                     }
                     luma += bilinear(yPlane, x, y)
                     cb += bilinear(uPlane, x / 2.0, y / 2.0)
                     cr += bilinear(vPlane, x / 2.0, y / 2.0)
                 }
+                if (cellOutOfImage) lastOutOfImageCells++
                 val count = (CELL_OFFSETS.size * CELL_OFFSETS.size).toDouble()
                 destination = writeRgb(
                     pixels, destination,
@@ -108,11 +123,11 @@ object P1PerspectiveSampler {
         for (row in 0 until P1PhysicalLayout.GRID_HEIGHT) {
             for (column in 0 until P1PhysicalLayout.GRID_WIDTH) {
                 val (x, y) = map(h, column + 0.5, row + 0.5)
-                require(x >= 0.0 && x < image.width && y >= 0.0 && y < image.height) {
-                    "Calibration maps P1 cell ($column,$row) outside the camera image"
+                if (x < 0.0 || x >= image.width || y < 0.0 || y >= image.height) {
+                    lastOutOfImageCells++
                 }
-                val ix = x.toInt()
-                val iy = y.toInt()
+                val ix = x.toInt().coerceIn(0, image.width - 1)
+                val iy = y.toInt().coerceIn(0, image.height - 1)
                 var red = 0
                 var green = 0
                 var blue = 0

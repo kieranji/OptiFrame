@@ -69,6 +69,9 @@ internal object P1ReceiverDiagnostics {
                     "${imageWidth}×$imageHeight rot=${rotationDegrees}°"
             )
             sampleError?.let { append(" · sample error: $it") }
+            if (rgb888 != null || sampleError != null) {
+                append(" · oob=${P1PerspectiveSampler.lastOutOfImageCells}")
+            }
         }
     }
 

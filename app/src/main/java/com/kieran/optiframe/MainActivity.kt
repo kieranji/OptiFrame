@@ -784,6 +784,7 @@ private fun SenderHome(
                             appendLine("cameraStatus=$cameraStatus")
                             appendLine("threeAStatus=$threeAStatus")
                             appendLine("diagnostics=$frameDiagnosticsLine")
+                            appendLine("outOfImageCells=${P1PerspectiveSampler.lastOutOfImageCells}")
                             appendLine("anchorPoints=$anchorPoints")
                             appendLine("manualAnchors=${manualAnchors != null}")
                             autoDetection?.let {
