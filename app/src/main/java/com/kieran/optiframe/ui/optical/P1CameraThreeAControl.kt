@@ -30,7 +30,9 @@ class P1CameraThreeAControl(
             val ranges = Camera2CameraInfo.from(camera.info).getCameraCharacteristic(
                 CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
             )
-            val range = ranges?.let { chooseRange(it, targetFps) }
+            val selectedRange = ranges?.map { it.lower..it.upper }
+                ?.let { chooseFpsRange(it, targetFps) }
+            val range = selectedRange?.let { Range(it.first, it.last) }
                 ?: return@runCatching "Camera fps unavailable"
             fpsRange = range
             Camera2CameraControl.from(camera.control)
@@ -103,10 +105,12 @@ class P1CameraThreeAControl(
             .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
             .build()
 
-    private fun chooseRange(ranges: Array<Range<Int>>, targetFps: Int): Range<Int>? =
-        ranges.firstOrNull { it.lower == targetFps && it.upper == targetFps }
-            ?: ranges.asSequence()
-                .filter { it.upper >= targetFps }
-                .maxWithOrNull(compareBy<Range<Int>> { it.lower }.thenBy { it.upper })
-            ?: ranges.maxByOrNull { it.upper }
+    companion object {
+        internal fun chooseFpsRange(ranges: List<IntRange>, targetFps: Int): IntRange? =
+            ranges.firstOrNull { it.first == targetFps && it.last == targetFps }
+                ?: ranges.asSequence()
+                    .filter { it.first <= targetFps && targetFps <= it.last }
+                    .maxWithOrNull(compareBy<IntRange> { it.first }.thenByDescending { it.last })
+                ?: ranges.maxByOrNull { it.last }
+    }
 }
