@@ -204,6 +204,7 @@ class P1BleControlClient(
                 controlCharacteristic = null
                 gatt.close()
                 this@P1BleControlClient.gatt = null
+                synchronized(pendingWrites) { writing = false }
                 onState("BLE control disconnected")
             } else if (newState == BluetoothProfile.STATE_CONNECTED) {
                 onState("BLE connected; discovering control service")
