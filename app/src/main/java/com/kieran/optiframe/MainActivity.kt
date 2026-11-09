@@ -332,6 +332,9 @@ private fun SenderHome(
         if (granted) {
             qrScanPending.set(false)
             if (transferLoadedFromQr && verifiedFile == null) {
+                runCatching { bleClient?.close() }
+                bleClient = null
+                bleStatus = "BLE control is not connected"
                 importedManifest = null
                 importedBootstrap = null
                 verifiedFile = null
@@ -688,6 +691,11 @@ private fun SenderHome(
                                         if (importedBootstrap?.sessionId == bootstrap.sessionId) {
                                             Unit
                                         } else if (bootstrap.fileSize <= Int.MAX_VALUE.toULong()) {
+                                            if (transferLoadedFromQr && importedBootstrap != null) {
+                                                runCatching { bleClient?.close() }
+                                                bleClient = null
+                                                bleStatus = "BLE control is not connected"
+                                            }
                                             importedManifest = manifest
                                             importedBootstrap = bootstrap
                                             transferLoadedFromQr = true
