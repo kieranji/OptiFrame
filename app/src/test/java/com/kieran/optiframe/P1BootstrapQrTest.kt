@@ -1,7 +1,9 @@
 package com.kieran.optiframe
 
 import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
 import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.BitMatrix
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import com.kieran.optiframe.protocol.OptiFrameBootstrapBuilder
@@ -55,6 +57,27 @@ class P1BootstrapQrTest {
         assertTrue(expectedManifest.sourceBlockKValues.contentEquals(actual.manifest.sourceBlockKValues))
     }
 
+    private fun decodeMatrix(matrix: BitMatrix): P1BootstrapQr.ScanResult? {
+        val scale = 8
+        val width = matrix.width * scale
+        val height = matrix.height * scale
+        val pixels = IntArray(width * height)
+        for (moduleY in 0 until matrix.height) {
+            for (moduleX in 0 until matrix.width) {
+                val color = if (matrix[moduleX, moduleY]) 0x000000 else 0xFFFFFF
+                for (dy in 0 until scale) {
+                    val offset = (moduleY * scale + dy) * width + moduleX * scale
+                    for (dx in 0 until scale) pixels[offset + dx] = color
+                }
+            }
+        }
+        val qrText = QRCodeReader().decode(
+            BinaryBitmap(HybridBinarizer(RGBLuminanceSource(width, height, pixels))),
+            mapOf(DecodeHintType.PURE_BARCODE to true)
+        ).text
+        return P1BootstrapQr.decodeQrBytes(qrText.toByteArray(Charsets.ISO_8859_1))
+    }
+
     @Test
     fun `transfer container round trips bootstrap and manifest`() {
         val manifest = manifest()
@@ -100,28 +123,71 @@ class P1BootstrapQrTest {
             sourceBlockKValues = IntArray(400) { 1024 }
         )
         val bootstrap = bootstrap(manifest)
-        val matrix = P1BootstrapQr.encodeMatrix(bootstrap, manifest)
-        val scale = 4
-        val width = matrix.width * scale
-        val height = matrix.height * scale
-        val pixels = IntArray(width * height)
-        for (moduleY in 0 until matrix.height) {
-            for (moduleX in 0 until matrix.width) {
-                val color = if (matrix[moduleX, moduleY]) 0x000000 else 0xFFFFFF
-                for (dy in 0 until scale) {
-                    val offset = (moduleY * scale + dy) * width + moduleX * scale
-                    for (dx in 0 until scale) pixels[offset + dx] = color
-                }
-            }
-        }
-        val qrText = QRCodeReader().decode(
-            BinaryBitmap(HybridBinarizer(RGBLuminanceSource(width, height, pixels)))
-        ).text
-        val result = P1BootstrapQr.decodeQrBytes(qrText.toByteArray(Charsets.ISO_8859_1))
+        val encoded = P1BootstrapQr.encodeMatrix(bootstrap, manifest)
+        val matrix = encoded.matrix
+        assertTrue(encoded.includesManifest)
+        val result = decodeMatrix(matrix)
 
         assertNotNull(result)
         assertTrue(result is P1BootstrapQr.ScanResult.Transfer)
         assertSameTransfer(bootstrap, manifest, result as P1BootstrapQr.ScanResult.Transfer)
         println("Transfer QR matrix: ${matrix.width}×${matrix.height} modules")
+    }
+
+    @Test
+    fun `300 MiB transfer retries ECC L and keeps its manifest`() {
+        val fileSize = 300L * 1024L * 1024L
+        val manifest = manifest(
+            fileName = "transfer-${"x".repeat(48)}.bin",
+            fileSize = fileSize,
+            sourceBlockKValues = IntArray(1200) { 1024 }
+        )
+        val bootstrap = bootstrap(manifest)
+        val encoded = P1BootstrapQr.encodeMatrix(bootstrap, manifest)
+
+        assertTrue(encoded.includesManifest)
+        val result = decodeMatrix(encoded.matrix)
+
+        assertTrue(result is P1BootstrapQr.ScanResult.Transfer)
+        assertSameTransfer(bootstrap, manifest, result as P1BootstrapQr.ScanResult.Transfer)
+    }
+
+    @Test
+    fun `300 MiB and 1 GiB manifests fall back to bootstrap-only QRs when neither ECC level fits`() {
+        val manifests = listOf(
+            manifest(
+                fileName = "transfer-${"x".repeat(48)}.bin",
+                fileSize = 300L * 1024L * 1024L,
+                sourceBlockKValues = IntArray(1536) { 800 }
+            ),
+            manifest(
+                fileName = "transfer-${"x".repeat(48)}.bin",
+                fileSize = 1024L * 1024L * 1024L,
+                sourceBlockKValues = IntArray(4096) { 1024 }
+            )
+        )
+
+        manifests.forEach { manifest ->
+            val bootstrap = bootstrap(manifest)
+            val encoded = P1BootstrapQr.encodeMatrix(bootstrap, manifest)
+
+            assertTrue(!encoded.includesManifest)
+            val result = try {
+                decodeMatrix(encoded.matrix)
+            } catch (error: Exception) {
+                throw AssertionError(
+                    "Could not decode fallback QR for ${manifest.fileSize} bytes " +
+                        "with ${manifest.sourceBlockCount} blocks (${encoded.matrix.width} modules)",
+                    error
+                )
+            }
+
+            assertTrue(result is P1BootstrapQr.ScanResult.BootstrapOnly)
+            val decoded = (result as P1BootstrapQr.ScanResult.BootstrapOnly).bootstrap
+            assertEquals(bootstrap.sessionId, decoded.sessionId)
+            assertEquals(bootstrap.fileSize, decoded.fileSize)
+            assertArrayEquals(bootstrap.fileSha256, decoded.fileSha256)
+            assertArrayEquals(bootstrap.manifestHash, decoded.manifestHash)
+        }
     }
 }

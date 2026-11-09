@@ -1053,13 +1053,17 @@ private fun SenderHome(
             view.keepScreenOn = true
             onDispose { view.keepScreenOn = previous }
         }
+        val renderedQr = remember(bootstrapPayload, active.manifest, showBootstrapQr) {
+            if (showBootstrapQr) {
+                bootstrapPayload?.let { P1BootstrapQr.render(it, active.manifest) }
+            } else {
+                null
+            }
+        }
         val transferDisplay: @Composable (Modifier) -> Unit = { displayModifier ->
-            if (showBootstrapQr && bootstrapPayload != null) {
-                val qr = remember(bootstrapPayload, active.manifest) {
-                    P1BootstrapQr.render(checkNotNull(bootstrapPayload), active.manifest)
-                }
+            if (renderedQr != null) {
                 Image(
-                    bitmap = qr.asImageBitmap(),
+                    bitmap = renderedQr.bitmap.asImageBitmap(),
                     contentDescription = "OptiFrame transfer bootstrap QR code",
                     modifier = displayModifier,
                     contentScale = ContentScale.Fit,
@@ -1086,7 +1090,11 @@ private fun SenderHome(
             ) {
                 Text("${active.manifest.fileName} · ${active.progress.completedBlocks}/${active.progress.totalBlocks} blocks", color = Color.White)
                 Text(if (showBootstrapQr) {
-                    "Receiver setup: scan this QR to load the transfer; connect BLE feedback for M4."
+                    if (renderedQr?.includesManifest == false) {
+                        "File too large to fit the manifest in the QR: export the receiver manifest (.ofm) and import it on the receiver, then scan this QR."
+                    } else {
+                        "Receiver setup: scan this QR to load the transfer; connect BLE feedback for M4."
+                    }
                 } else when (transferState) {
                     P1Safe30DisplayState.DISPLAYING -> if (active.fast60) "Displaying P1 FAST60 frames" else "Displaying SAFE30 frames"
                     P1Safe30DisplayState.WAITING_FOR_FEEDBACK -> if (active.fast60) "Waiting for BLE block feedback" else "Waiting for receiver feedback"

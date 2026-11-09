@@ -9,6 +9,7 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.WriterException
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeWriter
@@ -22,6 +23,10 @@ import com.kieran.optiframe.protocol.OptiFrameManifestCodec
 object P1BootstrapQr {
     private val TRANSFER_MAGIC = "OFQ1".encodeToByteArray()
     private const val MINIMUM_BITMAP_SIZE = 1000
+
+    internal data class EncodedMatrix(val matrix: BitMatrix, val includesManifest: Boolean)
+
+    data class Rendered(val bitmap: Bitmap, val includesManifest: Boolean)
 
     sealed interface ScanResult {
         data class Transfer(
@@ -86,18 +91,35 @@ object P1BootstrapQr {
     internal fun encodeMatrix(
         bootstrap: OptiFrameBootstrapPayload,
         manifest: OptiFrameManifest
-    ): BitMatrix {
-        val binaryText = String(encodeTransfer(bootstrap, manifest), Charsets.ISO_8859_1)
+    ): EncodedMatrix {
+        val transferBytes = encodeTransfer(bootstrap, manifest)
+        return try {
+            EncodedMatrix(encodeMatrix(transferBytes, ErrorCorrectionLevel.M), includesManifest = true)
+        } catch (_: WriterException) {
+            try {
+                EncodedMatrix(encodeMatrix(transferBytes, ErrorCorrectionLevel.L), includesManifest = true)
+            } catch (_: WriterException) {
+                EncodedMatrix(
+                    encodeMatrix(OptiFrameBootstrapCodec.encode(bootstrap), ErrorCorrectionLevel.M),
+                    includesManifest = false
+                )
+            }
+        }
+    }
+
+    private fun encodeMatrix(bytes: ByteArray, errorCorrection: ErrorCorrectionLevel): BitMatrix {
         val hints = mapOf(
             EncodeHintType.CHARACTER_SET to "ISO-8859-1",
-            EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
+            EncodeHintType.ERROR_CORRECTION to errorCorrection,
             EncodeHintType.MARGIN to 4
         )
+        val binaryText = String(bytes, Charsets.ISO_8859_1)
         return QRCodeWriter().encode(binaryText, BarcodeFormat.QR_CODE, 0, 0, hints)
     }
 
-    fun render(bootstrap: OptiFrameBootstrapPayload, manifest: OptiFrameManifest): Bitmap {
-        val matrix = encodeMatrix(bootstrap, manifest)
+    fun render(bootstrap: OptiFrameBootstrapPayload, manifest: OptiFrameManifest): Rendered {
+        val encoded = encodeMatrix(bootstrap, manifest)
+        val matrix = encoded.matrix
         val modules = maxOf(matrix.width, matrix.height)
         val scale = maxOf(1, (MINIMUM_BITMAP_SIZE + modules - 1) / modules)
         val width = matrix.width * scale
@@ -112,9 +134,10 @@ object P1BootstrapQr {
                 }
             }
         }
-        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
             setPixels(pixels, 0, width, 0, 0, width, height)
         }
+        return Rendered(bitmap, encoded.includesManifest)
     }
 
     /** Called while scanning setup QRs; avoids QR work during optical frame reception. */
