@@ -682,7 +682,6 @@ private fun SenderHome(
                         qrScanPending.set(false)
                     } else {
                         scope.launch(Dispatchers.Main) {
-                            var accepted = false
                             try {
                                 when (scanned) {
                                     is P1BootstrapQr.ScanResult.Transfer -> {
@@ -707,7 +706,6 @@ private fun SenderHome(
                                                 "Transfer QR accepted; align the sender's optical matrix."
                                             qrSuccessInfo = QrSuccessInfo(manifest.fileName, manifest.fileSize)
                                             qrSuccessToken++
-                                            accepted = true
                                         } else {
                                             val message = "Transfer is too large for this receiver build"
                                             manifestStatus = message
@@ -738,14 +736,13 @@ private fun SenderHome(
                                                 "Bootstrap accepted; align the sender's optical matrix."
                                             qrSuccessInfo = QrSuccessInfo(manifest.fileName, manifest.fileSize)
                                             qrSuccessToken++
-                                            accepted = true
                                         } else {
                                             cameraStatus = "QR found, but it does not match the imported manifest."
                                         }
                                     }
                                 }
                             } finally {
-                                if (!accepted) qrScanPending.set(false)
+                                qrScanPending.set(false)
                             }
                         }
                     }
