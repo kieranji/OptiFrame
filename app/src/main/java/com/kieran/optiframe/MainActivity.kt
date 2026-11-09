@@ -331,7 +331,7 @@ private fun SenderHome(
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             qrScanPending.set(false)
-            if (transferLoadedFromQr) {
+            if (transferLoadedFromQr && verifiedFile == null) {
                 importedManifest = null
                 importedBootstrap = null
                 verifiedFile = null
@@ -669,7 +669,8 @@ private fun SenderHome(
                 }
                 val pipeline = receivePipeline
                 if (pipeline != null && verifiedFile == null) runCatching { pipeline.pollStall() }
-                if (pipeline == null && importedBootstrap == null &&
+                if ((pipeline == null && importedBootstrap == null ||
+                        transferLoadedFromQr && verifiedFile != null) &&
                     qrFrameCounter.incrementAndGet() % 3 == 0 &&
                     qrScanPending.compareAndSet(false, true)
                 ) {
@@ -684,7 +685,9 @@ private fun SenderHome(
                                     is P1BootstrapQr.ScanResult.Transfer -> {
                                         val manifest = scanned.manifest
                                         val bootstrap = scanned.bootstrap
-                                        if (bootstrap.fileSize <= Int.MAX_VALUE.toULong()) {
+                                        if (importedBootstrap?.sessionId == bootstrap.sessionId) {
+                                            Unit
+                                        } else if (bootstrap.fileSize <= Int.MAX_VALUE.toULong()) {
                                             importedManifest = manifest
                                             importedBootstrap = bootstrap
                                             transferLoadedFromQr = true
