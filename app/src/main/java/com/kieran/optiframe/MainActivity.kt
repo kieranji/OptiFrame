@@ -216,6 +216,7 @@ private fun SenderHome(
     var cameraStatus by remember { mutableStateOf("Camera is not active") }
     var importedManifest by remember { mutableStateOf<OptiFrameManifest?>(null) }
     var importedBootstrap by remember { mutableStateOf<OptiFrameBootstrapPayload?>(null) }
+    var transferLoadedFromQr by remember { mutableStateOf(false) }
     var bootstrapPayload by remember { mutableStateOf<OptiFrameBootstrapPayload?>(null) }
     var manifestStatus by remember {
         mutableStateOf("Start the receiver camera and scan the sender's QR (or import .ofm/.ofb).")
@@ -330,6 +331,15 @@ private fun SenderHome(
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             qrScanPending.set(false)
+            if (transferLoadedFromQr) {
+                importedManifest = null
+                importedBootstrap = null
+                verifiedFile = null
+                receiveMetrics = null
+                calibratedAnchors = null
+                transferLoadedFromQr = false
+                manifestStatus = "Start the receiver camera and scan the sender's QR (or import .ofm/.ofb)."
+            }
             receiving = true
             cameraStatus = "Starting camera…"
         } else {
@@ -482,6 +492,7 @@ private fun SenderHome(
     }
     val manifestPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
+            transferLoadedFromQr = false
             try {
                 importedManifest = readManifest(uri)
                 qrScanPending.set(false)
@@ -505,6 +516,7 @@ private fun SenderHome(
     }
     val bootstrapPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
+            transferLoadedFromQr = false
             try {
                 val candidate = readBootstrap(uri)
                 val manifest = importedManifest ?: error("Import the manifest first")
@@ -675,6 +687,7 @@ private fun SenderHome(
                                         if (bootstrap.fileSize <= Int.MAX_VALUE.toULong()) {
                                             importedManifest = manifest
                                             importedBootstrap = bootstrap
+                                            transferLoadedFromQr = true
                                             verifiedFile = null
                                             receiveMetrics = null
                                             calibratedAnchors = null
