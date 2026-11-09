@@ -1,7 +1,12 @@
 package com.kieran.optiframe
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import android.net.Uri
 import android.os.Build
@@ -12,6 +17,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ImageProxy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -19,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
@@ -35,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -42,12 +50,19 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.kieran.optiframe.acceptance.P1AcceptanceChecklist
 import com.kieran.optiframe.acceptance.P1AcceptancePreset
@@ -85,6 +100,7 @@ import com.kieran.optiframe.ui.ble.P1BleControlClient
 import com.kieran.optiframe.ui.ble.P1BleControlServer
 import com.kieran.optiframe.ui.theme.OptiFrameTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -94,6 +110,8 @@ import java.io.FileInputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+
+private data class QrSuccessInfo(val fileName: String, val fileSizeBytes: Long)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -199,13 +217,18 @@ private fun SenderHome(
     var importedManifest by remember { mutableStateOf<OptiFrameManifest?>(null) }
     var importedBootstrap by remember { mutableStateOf<OptiFrameBootstrapPayload?>(null) }
     var bootstrapPayload by remember { mutableStateOf<OptiFrameBootstrapPayload?>(null) }
-    var manifestStatus by remember { mutableStateOf("Import the sender's .ofm manifest to start receiving.") }
+    var manifestStatus by remember {
+        mutableStateOf("Start the receiver camera and scan the sender's QR (or import .ofm/.ofb).")
+    }
     var verifiedFile by remember { mutableStateOf<File?>(null) }
     var receiveMetrics by remember { mutableStateOf<P1M3TransferMetrics?>(null) }
     var calibratedAnchors by remember { mutableStateOf<P1PerspectiveSampler.AnchorPoints?>(null) }
     var showBootstrapQr by remember { mutableStateOf(false) }
     var bleStatus by remember { mutableStateOf("BLE control is not connected") }
     val qrFrameCounter = remember { AtomicInteger(0) }
+    val qrScanPending = remember { AtomicBoolean(false) }
+    var qrSuccessToken by remember { mutableIntStateOf(0) }
+    var qrSuccessInfo by remember { mutableStateOf<QrSuccessInfo?>(null) }
     val diagnosticFrameCounter = remember { AtomicInteger(0) }
     val diagnosticCaptureArmed = remember { AtomicBoolean(false) }
     val diagnosticArchiveRef = remember { AtomicReference<P1ReceiverDiagnosticArchive?>(null) }
@@ -306,6 +329,7 @@ private fun SenderHome(
     }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
+            qrScanPending.set(false)
             receiving = true
             cameraStatus = "Starting camera…"
         } else {
@@ -460,6 +484,7 @@ private fun SenderHome(
         if (uri != null) scope.launch {
             try {
                 importedManifest = readManifest(uri)
+                qrScanPending.set(false)
                 bleClient?.close()
                 bleClient = null
                 bleStatus = "BLE control is not connected"
@@ -599,7 +624,8 @@ private fun SenderHome(
 
     val active = session
     if (receiving) {
-        Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             P1CameraPreview(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 onThreeAControl = { control ->
@@ -627,24 +653,65 @@ private fun SenderHome(
                 }
                 val pipeline = receivePipeline
                 if (pipeline != null && verifiedFile == null) runCatching { pipeline.pollStall() }
-                if (pipeline == null && importedManifest != null && importedBootstrap == null &&
-                    qrFrameCounter.incrementAndGet() % 3 == 0
+                if (pipeline == null && importedBootstrap == null &&
+                    qrFrameCounter.incrementAndGet() % 3 == 0 &&
+                    qrScanPending.compareAndSet(false, true)
                 ) {
-                    val scanned = P1BootstrapQr.scan(image)
-                    if (scanned != null) {
-                        val manifest = importedManifest
-                        if (manifest != null && scanned.fileSize <= Int.MAX_VALUE.toULong() &&
-                            scanned.fileSize.toLong() == manifest.fileSize &&
-                            scanned.fileSha256.contentEquals(manifest.fileSha256) &&
-                            scanned.manifestHash.contentEquals(OptiFrameManifestCodec.hash(manifest))
-                        ) {
-                            importedBootstrap = scanned
-                            verifiedFile = null
-                            receiveMetrics = null
-                            manifestStatus = "Bootstrap QR verified for ${manifest.fileName}"
-                            cameraStatus = "Bootstrap accepted; align the sender's optical matrix."
-                        } else {
-                            cameraStatus = "QR found, but it does not match the imported manifest."
+                    val scanned = runCatching { P1BootstrapQr.scan(image) }.getOrNull()
+                    if (scanned == null) {
+                        qrScanPending.set(false)
+                    } else {
+                        scope.launch(Dispatchers.Main) {
+                            var accepted = false
+                            try {
+                                when (scanned) {
+                                    is P1BootstrapQr.ScanResult.Transfer -> {
+                                        val manifest = scanned.manifest
+                                        val bootstrap = scanned.bootstrap
+                                        importedManifest = manifest
+                                        importedBootstrap = bootstrap
+                                        verifiedFile = null
+                                        receiveMetrics = null
+                                        calibratedAnchors = null
+                                        manifestStatus = "Transfer QR verified for ${manifest.fileName}"
+                                        cameraStatus = "Transfer QR accepted; align the sender's optical matrix."
+                                        qrSuccessInfo = QrSuccessInfo(manifest.fileName, manifest.fileSize)
+                                        qrSuccessToken++
+                                        accepted = true
+                                    }
+                                    is P1BootstrapQr.ScanResult.BootstrapOnly -> {
+                                        val manifest = importedManifest
+                                        val bootstrap = scanned.bootstrap
+                                        if (manifest == null) {
+                                            val message =
+                                                "This QR has no manifest; import the sender's .ofm or update the sender app."
+                                            manifestStatus = message
+                                            cameraStatus = message
+                                        } else if (
+                                            bootstrap.fileSize <= Int.MAX_VALUE.toULong() &&
+                                            bootstrap.fileSize.toLong() == manifest.fileSize &&
+                                            bootstrap.fileSha256.contentEquals(manifest.fileSha256) &&
+                                            bootstrap.manifestHash.contentEquals(
+                                                OptiFrameManifestCodec.hash(manifest)
+                                            )
+                                        ) {
+                                            importedBootstrap = bootstrap
+                                            verifiedFile = null
+                                            receiveMetrics = null
+                                            manifestStatus = "Bootstrap QR verified for ${manifest.fileName}"
+                                            cameraStatus =
+                                                "Bootstrap accepted; align the sender's optical matrix."
+                                            qrSuccessInfo = QrSuccessInfo(manifest.fileName, manifest.fileSize)
+                                            qrSuccessToken++
+                                            accepted = true
+                                        } else {
+                                            cameraStatus = "QR found, but it does not match the imported manifest."
+                                        }
+                                    }
+                                }
+                            } finally {
+                                if (!accepted) qrScanPending.set(false)
+                            }
                         }
                     }
                 }
@@ -959,6 +1026,12 @@ private fun SenderHome(
                     ) { Text("Stop camera") }
                 }
             }
+            }
+            P1QrSuccessOverlay(
+                qrSuccessToken = qrSuccessToken,
+                info = qrSuccessInfo,
+                modifier = Modifier.align(Alignment.Center)
+            )
         }
     } else if (active != null) {
         val view = LocalView.current
@@ -969,12 +1042,15 @@ private fun SenderHome(
         }
         val transferDisplay: @Composable (Modifier) -> Unit = { displayModifier ->
             if (showBootstrapQr && bootstrapPayload != null) {
-                val qr = remember(bootstrapPayload) { P1BootstrapQr.render(checkNotNull(bootstrapPayload)) }
+                val qr = remember(bootstrapPayload, active.manifest) {
+                    P1BootstrapQr.render(checkNotNull(bootstrapPayload), active.manifest)
+                }
                 Image(
                     bitmap = qr.asImageBitmap(),
                     contentDescription = "OptiFrame transfer bootstrap QR code",
                     modifier = displayModifier,
-                    contentScale = ContentScale.Fit
+                    contentScale = ContentScale.Fit,
+                    filterQuality = FilterQuality.None
                 )
             } else {
                 P1OpticalDisplay(
@@ -997,7 +1073,7 @@ private fun SenderHome(
             ) {
                 Text("${active.manifest.fileName} · ${active.progress.completedBlocks}/${active.progress.totalBlocks} blocks", color = Color.White)
                 Text(if (showBootstrapQr) {
-                    "Receiver setup: scan this QR, import the manifest, then connect BLE feedback for M4."
+                    "Receiver setup: scan this QR to load the transfer; connect BLE feedback for M4."
                 } else when (transferState) {
                     P1Safe30DisplayState.DISPLAYING -> if (active.fast60) "Displaying P1 FAST60 frames" else "Displaying SAFE30 frames"
                     P1Safe30DisplayState.WAITING_FOR_FEEDBACK -> if (active.fast60) "Waiting for BLE block feedback" else "Waiting for receiver feedback"
@@ -1115,7 +1191,7 @@ private fun SenderHome(
                         OutlinedButton(onClick = {
                             cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
                         },
-                            enabled = importedManifest != null && (
+                            enabled = (
                                 importedBootstrap?.let {
                                     (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) == 0L
                                 } != false ||
@@ -1131,6 +1207,83 @@ private fun SenderHome(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun P1QrSuccessOverlay(
+    qrSuccessToken: Int,
+    info: QrSuccessInfo?,
+    modifier: Modifier = Modifier
+) {
+    if (qrSuccessToken == 0 || info == null) return
+
+    val scale = remember(qrSuccessToken) { Animatable(0.6f) }
+    val checkProgress = remember(qrSuccessToken) { Animatable(0f) }
+    val overlayAlpha = remember(qrSuccessToken) { Animatable(1f) }
+    val haptic = LocalHapticFeedback.current
+
+    LaunchedEffect(qrSuccessToken) {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        launch { scale.animateTo(1f, spring()) }
+        launch { checkProgress.animateTo(1f, tween(350)) }
+        delay(1_500)
+        overlayAlpha.animateTo(0f, tween(300))
+    }
+
+    Column(
+        modifier = modifier
+            .graphicsLayer { alpha = overlayAlpha.value }
+            .background(Color.Black.copy(alpha = 0.78f), RoundedCornerShape(20.dp))
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Canvas(
+            modifier = Modifier
+                .size(88.dp)
+                .graphicsLayer {
+                    scaleX = scale.value
+                    scaleY = scale.value
+                }
+        ) {
+            drawCircle(Color(0xFF2E7D32))
+            val start = Offset(size.width * 0.25f, size.height * 0.52f)
+            val middle = Offset(size.width * 0.43f, size.height * 0.69f)
+            val end = Offset(size.width * 0.76f, size.height * 0.32f)
+            val progress = checkProgress.value
+            if (progress > 0f) {
+                val firstProgress = (progress * 2f).coerceAtMost(1f)
+                drawLine(
+                    Color.White,
+                    start,
+                    Offset(
+                        start.x + (middle.x - start.x) * firstProgress,
+                        start.y + (middle.y - start.y) * firstProgress
+                    ),
+                    strokeWidth = size.minDimension * 0.085f,
+                    cap = StrokeCap.Round
+                )
+            }
+            if (progress > 0.5f) {
+                val secondProgress = (progress - 0.5f) * 2f
+                drawLine(
+                    Color.White,
+                    middle,
+                    Offset(
+                        middle.x + (end.x - middle.x) * secondProgress,
+                        middle.y + (end.y - middle.y) * secondProgress
+                    ),
+                    strokeWidth = size.minDimension * 0.085f,
+                    cap = StrokeCap.Round
+                )
+            }
+        }
+        Text(
+            "QR verified · ${info.fileName} · ${String.format(Locale.US, "%.2f", info.fileSizeBytes / 1_048_576.0)} MiB",
+            color = Color.White,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
