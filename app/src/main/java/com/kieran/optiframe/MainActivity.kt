@@ -649,7 +649,11 @@ private fun SenderHome(
                 },
                 onImage = { image: ImageProxy ->
                 if (cameraStatus == "Camera ready" || cameraStatus == "Starting camera…") {
-                    cameraStatus = "Point the camera at the sender's optical matrix; anchors are detected automatically."
+                    cameraStatus = if (importedBootstrap == null) {
+                        "Point the camera at the sender's QR code to load the transfer."
+                    } else {
+                        "Point the camera at the sender's optical matrix; anchors are detected automatically."
+                    }
                 }
                 val pipeline = receivePipeline
                 if (pipeline != null && verifiedFile == null) runCatching { pipeline.pollStall() }
@@ -668,16 +672,23 @@ private fun SenderHome(
                                     is P1BootstrapQr.ScanResult.Transfer -> {
                                         val manifest = scanned.manifest
                                         val bootstrap = scanned.bootstrap
-                                        importedManifest = manifest
-                                        importedBootstrap = bootstrap
-                                        verifiedFile = null
-                                        receiveMetrics = null
-                                        calibratedAnchors = null
-                                        manifestStatus = "Transfer QR verified for ${manifest.fileName}"
-                                        cameraStatus = "Transfer QR accepted; align the sender's optical matrix."
-                                        qrSuccessInfo = QrSuccessInfo(manifest.fileName, manifest.fileSize)
-                                        qrSuccessToken++
-                                        accepted = true
+                                        if (bootstrap.fileSize <= Int.MAX_VALUE.toULong()) {
+                                            importedManifest = manifest
+                                            importedBootstrap = bootstrap
+                                            verifiedFile = null
+                                            receiveMetrics = null
+                                            calibratedAnchors = null
+                                            manifestStatus = "Transfer QR verified for ${manifest.fileName}"
+                                            cameraStatus =
+                                                "Transfer QR accepted; align the sender's optical matrix."
+                                            qrSuccessInfo = QrSuccessInfo(manifest.fileName, manifest.fileSize)
+                                            qrSuccessToken++
+                                            accepted = true
+                                        } else {
+                                            val message = "Transfer is too large for this receiver build"
+                                            manifestStatus = message
+                                            cameraStatus = message
+                                        }
                                     }
                                     is P1BootstrapQr.ScanResult.BootstrapOnly -> {
                                         val manifest = importedManifest
@@ -980,7 +991,9 @@ private fun SenderHome(
                         }
                     }
                 }
-                Text("Tap the center of each 6×6 corner anchor clockwise: top-left, top-right, bottom-right, bottom-left. Repeat to recalibrate.", color = Color.White)
+                if (importedBootstrap != null) {
+                    Text("Tap the center of each 6×6 corner anchor clockwise: top-left, top-right, bottom-right, bottom-left. Repeat to recalibrate.", color = Color.White)
+                }
                 if (verifiedFile != null) {
                     receiveMetrics?.let { metrics ->
                         val rate = metrics.goodputKibPerSecond?.let { "%.1f KiB/s".format(it) } ?: "n/a"
