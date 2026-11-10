@@ -2,6 +2,9 @@ package com.kieran.optiframe.ui.optical
 
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.camera.view.transform.CoordinateTransform
@@ -9,14 +12,18 @@ import androidx.camera.view.transform.ImageProxyTransformFactory
 import androidx.camera.view.transform.OutputTransform
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import android.graphics.PointF
+import android.util.Size
 import android.view.MotionEvent
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -35,6 +42,16 @@ fun P1CameraPreview(
     val lifecycleOwner = LocalLifecycleOwner.current
     val controller = androidx.compose.runtime.remember(context) {
         LifecycleCameraController(context).apply {
+            setEnabledUseCases(CameraController.IMAGE_ANALYSIS)
+            // The 640x480 analysis default leaves ~2 px per P1 cell and blurs the pilots together.
+            imageAnalysisResolutionSelector = ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(1920, 1080),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                    )
+                )
+                .build()
             setImageAnalysisBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             setImageAnalysisOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
         }
@@ -51,6 +68,15 @@ fun P1CameraPreview(
     val threeAControl = remember(controller) { P1CameraThreeAControl(controller) }
     val imageTransform = remember { AtomicReference<OutputTransform?>(null) }
     val calibrationPoints = remember { mutableStateListOf<PointF>() }
+    val orientation = LocalConfiguration.current.orientation
+    val lastOrientation = remember { mutableIntStateOf(orientation) }
+    LaunchedEffect(orientation) {
+        if (lastOrientation.intValue != orientation) {
+            lastOrientation.intValue = orientation
+            calibrationPoints.clear()
+            latestOnAnchors.value(null)
+        }
+    }
     val transformFactory = remember {
         ImageProxyTransformFactory().apply {
             setUsingCropRect(false)
@@ -71,6 +97,7 @@ fun P1CameraPreview(
         }
         onDispose {
             controller.clearImageAnalysisAnalyzer()
+            threeAControl.invalidate()
             controller.unbind()
             analyzerExecutor.shutdown()
         }

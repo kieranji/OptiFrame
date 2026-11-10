@@ -2,7 +2,6 @@ package com.kieran.optiframe.ui.optical
 
 import androidx.camera.core.ImageProxy
 import java.io.File
-import java.io.FileOutputStream
 import com.kieran.optiframe.protocol.OptiFrameManifest
 import com.kieran.optiframe.protocol.OptiFrameManifestCodec
 import com.kieran.optiframe.protocol.OptiFrameBootstrapPayload
@@ -12,6 +11,7 @@ import com.kieran.optiframe.protocol.P1M3TransferMetrics
 import com.kieran.optiframe.protocol.P1CompositeFrameException
 import com.kieran.optiframe.protocol.RaptorQBlockFeedback
 import com.kieran.optiframe.protocol.P1ReceiverStallWatchdog
+import com.kieran.optiframe.acceptance.P1GoodputWindow
 
 /** Camera frame -> perspective sampling -> P1 decode -> RaptorQ file verification. */
 class P1CameraReceivePipeline(
@@ -28,15 +28,35 @@ class P1CameraReceivePipeline(
         val sessionId: Long,
         val verifiedFile: ByteArray?,
         val verified: Boolean,
-        val metrics: P1M3TransferMetrics
+        val metrics: P1M3TransferMetrics,
+        val firstMinuteKibPerSecond: Double? = null,
+        val lastMinuteKibPerSecond: Double? = null
     )
 
-    private val receiver: P1M3ReceiverSession by lazy(LazyThreadSafetyMode.NONE) {
-        OpenRqRaptorQ.m3ReceiverSession(manifest, bootstrap.sessionId)
+    private val goodputWindow = P1GoodputWindow()
+    private val receiverDelegate = lazy(LazyThreadSafetyMode.NONE) {
+        OpenRqRaptorQ.m3ReceiverSession(
+            manifest,
+            bootstrap.sessionId,
+            spoolFile = outputFile?.let { File("${it.path}.part") }
+        )
     }
+    private val receiver by receiverDelegate
     private var completedFile: ByteArray? = null
     private var completed = false
+    private var closed = false
     private var mixedFramesDropped = 0L
+    var verificationFailed: Boolean = false
+        private set
+
+    val metrics: P1M3TransferMetrics
+        get() = currentMetrics()
+
+    val firstMinuteKibPerSecond: Double?
+        get() = goodputWindow.firstMinuteKibPerSecond
+
+    val lastMinuteKibPerSecond: Double?
+        get() = goodputWindow.lastMinuteKibPerSecond
 
     init {
         require(erasureThreshold in 0.0..1.0)
@@ -53,8 +73,9 @@ class P1CameraReceivePipeline(
 
     @Synchronized
     fun accept(image: ImageProxy, anchors: P1PerspectiveSampler.AnchorPoints): FrameResult {
+        check(!closed) { "Receiver pipeline is closed" }
         if (completed) {
-            return FrameResult(bootstrap.sessionId, completedFile, true, currentMetrics())
+            return frameResult()
         }
 
         val decoded = try {
@@ -72,6 +93,7 @@ class P1CameraReceivePipeline(
             erasureThreshold = erasureThreshold,
             requestRepairsOnlyOnSlotFailures = requestRepairsOnlyOnSlotFailures
         )
+        goodputWindow.onProgress(System.nanoTime(), receiver.metrics.uniqueSymbolsReceived)
         stallWatchdog?.onFrame(
             decoded.frame.header.sourceBlockNumber,
             result,
@@ -81,17 +103,12 @@ class P1CameraReceivePipeline(
         if (receiver.isComplete) {
             finish()
         }
-        return FrameResult(
-            sessionId = bootstrap.sessionId,
-            verifiedFile = completedFile,
-            verified = completed,
-            metrics = currentMetrics()
-        )
+        return frameResult()
     }
 
     @Synchronized
     fun pollStall(nowNanos: Long = System.nanoTime()) {
-        if (completed) return
+        if (closed || completed) return
         val block = stallWatchdog?.poll(nowNanos) ?: return
         receiver.stallRepairFeedback(block)?.let(onFeedback)
     }
@@ -99,27 +116,56 @@ class P1CameraReceivePipeline(
     /** Completes a zero-source-block (empty) transfer before any frame arrives. */
     @Synchronized
     fun finishIfComplete(): FrameResult? {
-        if (completed) return FrameResult(bootstrap.sessionId, completedFile, true, currentMetrics())
+        check(!closed) { "Receiver pipeline is closed" }
+        if (completed) return frameResult()
         if (!receiver.isComplete) return null
         finish()
-        return FrameResult(bootstrap.sessionId, completedFile, true, currentMetrics())
+        return frameResult()
+    }
+
+    @Synchronized
+    fun close() {
+        if (closed) return
+        closed = true
+        if (receiverDelegate.isInitialized()) {
+            runCatching { receiver.close() }
+        }
+        if (!completed) {
+            outputFile?.let { File("${it.path}.part").delete() }
+        }
     }
 
     private fun finish() {
-        if (outputFile == null) {
-            completedFile = receiver.finishAndVerifyFile()
-        } else {
-            outputFile.parentFile?.mkdirs()
-            try {
-                FileOutputStream(outputFile, false).use { receiver.finishAndVerifyFile(it) }
-            } catch (error: Exception) {
+        try {
+            if (outputFile == null) {
+                completedFile = receiver.finishAndVerifyFile()
+            } else {
+                val spooledFile = receiver.finishAndVerifySpooledFile()
                 outputFile.delete()
-                throw error
+                if (!spooledFile.renameTo(outputFile)) {
+                    spooledFile.copyTo(outputFile, overwrite = true)
+                    spooledFile.delete()
+                }
             }
+        } catch (error: Exception) {
+            verificationFailed = true
+            outputFile?.delete()
+            outputFile?.let { File("${it.path}.part").delete() }
+            runCatching { receiver.close() }
+            throw error
         }
         completed = true
         runCatching(onTransferComplete)
     }
+
+    private fun frameResult(): FrameResult = FrameResult(
+        sessionId = bootstrap.sessionId,
+        verifiedFile = completedFile,
+        verified = completed,
+        metrics = currentMetrics(),
+        firstMinuteKibPerSecond = goodputWindow.firstMinuteKibPerSecond,
+        lastMinuteKibPerSecond = goodputWindow.lastMinuteKibPerSecond
+    )
 
     private fun currentMetrics(): P1M3TransferMetrics {
         val metrics = receiver.metrics

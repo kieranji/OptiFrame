@@ -1,5 +1,13 @@
 package com.kieran.optiframe
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -9,23 +17,32 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ImageProxy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -33,13 +50,24 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.kieran.optiframe.acceptance.P1AcceptanceChecklist
+import com.kieran.optiframe.acceptance.P1AcceptancePreset
+import com.kieran.optiframe.acceptance.P1AcceptanceRecord
+import com.kieran.optiframe.acceptance.P1AcceptanceStore
 import com.kieran.optiframe.protocol.OptiFrameGlobalHeader
 import com.kieran.optiframe.protocol.OptiFrameManifest
 import com.kieran.optiframe.protocol.OptiFrameManifestCodec
@@ -64,20 +92,26 @@ import com.kieran.optiframe.ui.optical.P1CameraThreeAControl
 import com.kieran.optiframe.ui.optical.P1PerspectiveSampler
 import com.kieran.optiframe.ui.optical.P1AnchorDetector
 import com.kieran.optiframe.ui.optical.P1AnchorTracker
+import com.kieran.optiframe.ui.optical.P1ReceiverDiagnosticArchive
+import com.kieran.optiframe.ui.optical.P1ReceiverDiagnostics
 import com.kieran.optiframe.ui.optical.P1ThreeALockPolicy
 import com.kieran.optiframe.ui.optical.P1BootstrapQr
 import com.kieran.optiframe.ui.ble.P1BleControlClient
 import com.kieran.optiframe.ui.ble.P1BleControlServer
 import com.kieran.optiframe.ui.theme.OptiFrameTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.Locale
 import java.io.File
 import java.io.FileInputStream
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+
+private data class QrSuccessInfo(val fileName: String, val fileSizeBytes: Long)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -182,16 +216,37 @@ private fun SenderHome(
     var cameraStatus by remember { mutableStateOf("Camera is not active") }
     var importedManifest by remember { mutableStateOf<OptiFrameManifest?>(null) }
     var importedBootstrap by remember { mutableStateOf<OptiFrameBootstrapPayload?>(null) }
+    var transferLoadedFromQr by remember { mutableStateOf(false) }
     var bootstrapPayload by remember { mutableStateOf<OptiFrameBootstrapPayload?>(null) }
-    var manifestStatus by remember { mutableStateOf("Import the sender's .ofm manifest to start receiving.") }
+    var manifestStatus by remember {
+        mutableStateOf("Start the receiver camera and scan the sender's QR (or import .ofm/.ofb).")
+    }
     var verifiedFile by remember { mutableStateOf<File?>(null) }
     var receiveMetrics by remember { mutableStateOf<P1M3TransferMetrics?>(null) }
     var calibratedAnchors by remember { mutableStateOf<P1PerspectiveSampler.AnchorPoints?>(null) }
     var showBootstrapQr by remember { mutableStateOf(false) }
     var bleStatus by remember { mutableStateOf("BLE control is not connected") }
     val qrFrameCounter = remember { AtomicInteger(0) }
+    val qrScanPending = remember { AtomicBoolean(false) }
+    var qrSuccessToken by remember { mutableIntStateOf(0) }
+    var qrSuccessInfo by remember { mutableStateOf<QrSuccessInfo?>(null) }
+    val diagnosticFrameCounter = remember { AtomicInteger(0) }
+    val diagnosticCaptureArmed = remember { AtomicBoolean(false) }
+    val diagnosticArchiveRef = remember { AtomicReference<P1ReceiverDiagnosticArchive?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val acceptanceStore = remember(context) { P1AcceptanceStore(context) }
+    var acceptanceRecords by remember(acceptanceStore) {
+        mutableStateOf(acceptanceStore.all())
+    }
+    var acceptancePreset by remember(acceptanceStore) {
+        mutableStateOf(acceptanceStore.preset())
+    }
+    val recordedAcceptancePipelines = remember {
+        java.util.Collections.newSetFromMap(
+            java.util.WeakHashMap<P1CameraReceivePipeline, Boolean>()
+        )
+    }
     val currentBleClient by rememberUpdatedState(bleClient)
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -275,6 +330,19 @@ private fun SenderHome(
     }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
+            qrScanPending.set(false)
+            if (transferLoadedFromQr && verifiedFile == null) {
+                runCatching { bleClient?.close() }
+                bleClient = null
+                bleStatus = "BLE control is not connected"
+                importedManifest = null
+                importedBootstrap = null
+                verifiedFile = null
+                receiveMetrics = null
+                calibratedAnchors = null
+                transferLoadedFromQr = false
+                manifestStatus = "Start the receiver camera and scan the sender's QR (or import .ofm/.ofb)."
+            }
             receiving = true
             cameraStatus = "Starting camera…"
         } else {
@@ -337,13 +405,45 @@ private fun SenderHome(
             )
         } else null
     }
+    DisposableEffect(receivePipeline) {
+        onDispose { receivePipeline?.close() }
+    }
     val anchorTracker = remember(receivePipeline) { P1AnchorTracker() }
     val threeAPolicy = remember(receivePipeline) { P1ThreeALockPolicy() }
     val threeAControlRef = remember { AtomicReference<P1CameraThreeAControl?>(null) }
     var threeAStatus by remember { mutableStateOf("3A waiting for camera") }
+    var diagnosticsLine by remember { mutableStateOf("Diagnostics: waiting for anchors") }
+    var diagnosticSaveStatus by remember { mutableStateOf<String?>(null) }
+    var lastDecodeError by remember { mutableStateOf("none") }
     val receiverFast60 = importedBootstrap?.let {
         (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
     } == true
+    fun recordAcceptance(
+        pipeline: P1CameraReceivePipeline,
+        metrics: P1M3TransferMetrics,
+        firstMinuteKibPerSecond: Double?,
+        lastMinuteKibPerSecond: Double?
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val firstRecord = synchronized(recordedAcceptancePipelines) {
+            recordedAcceptancePipelines.add(pipeline)
+        }
+        if (!firstRecord) return
+        acceptanceStore.add(
+            P1AcceptanceRecord(
+                fast60 = receiverFast60,
+                fileSizeBytes = importedManifest?.fileSize ?: metrics.verifiedFileBytes ?: 0L,
+                sha256Verified = metrics.sha256Verified && !pipeline.verificationFailed,
+                goodputKibPerSecond = metrics.goodputKibPerSecond,
+                macroblockPassRate = metrics.macroblockPassRate,
+                elapsedMillis = metrics.elapsedMillis,
+                firstMinuteKibPerSecond = firstMinuteKibPerSecond,
+                lastMinuteKibPerSecond = lastMinuteKibPerSecond
+            )
+        )
+        val updatedRecords = acceptanceStore.all()
+        scope.launch { acceptanceRecords = updatedRecords }
+    }
 
     val m4ReceiverPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (grants.values.all { it }) {
@@ -395,8 +495,10 @@ private fun SenderHome(
     }
     val manifestPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
+            transferLoadedFromQr = false
             try {
                 importedManifest = readManifest(uri)
+                qrScanPending.set(false)
                 bleClient?.close()
                 bleClient = null
                 bleStatus = "BLE control is not connected"
@@ -417,6 +519,7 @@ private fun SenderHome(
     }
     val bootstrapPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
+            transferLoadedFromQr = false
             try {
                 val candidate = readBootstrap(uri)
                 val manifest = importedManifest ?: error("Import the manifest first")
@@ -477,6 +580,29 @@ private fun SenderHome(
             }
         }
     }
+    val diagnosticArchiveSaver = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        val archive = diagnosticArchiveRef.getAndSet(null)
+        if (uri == null) {
+            diagnosticSaveStatus = "Diagnostic save cancelled."
+        } else if (archive == null) {
+            diagnosticSaveStatus = "Diagnostic save failed: captured frame is unavailable."
+        } else {
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) {
+                        val output = context.contentResolver.openOutputStream(uri)
+                            ?: error("Could not open the diagnostic archive")
+                        output.use { archive.writeTo(it) }
+                    }
+                    diagnosticSaveStatus = "Diagnostic saved"
+                } catch (error: Exception) {
+                    diagnosticSaveStatus = "Diagnostic save failed: ${error.message ?: "unknown error"}"
+                }
+            }
+        }
+    }
     LaunchedEffect(receivePipeline) {
         threeAControlRef.get()?.unlock()
         if (receivePipeline != null) {
@@ -484,20 +610,39 @@ private fun SenderHome(
         }
         val outcome = runCatching { receivePipeline?.finishIfComplete() }
         val result = outcome.getOrNull()
-        if (result != null && verifiedFile == null) {
-            verifiedFile = receiveFile
-            receiveMetrics = result.metrics
-            cameraStatus = "SHA-256 verified · ${importedManifest?.fileSize ?: 0} bytes received."
+        if (result?.verified == true) {
+            receivePipeline?.let {
+                recordAcceptance(
+                    it,
+                    result.metrics,
+                    result.firstMinuteKibPerSecond,
+                    result.lastMinuteKibPerSecond
+                )
+            }
+            if (verifiedFile == null) {
+                verifiedFile = receiveFile
+                receiveMetrics = result.metrics
+                cameraStatus = "SHA-256 verified · ${importedManifest?.fileSize ?: 0} bytes received."
+            }
         } else outcome.exceptionOrNull()?.let {
+            receivePipeline?.takeIf { pipeline -> pipeline.verificationFailed }?.let { pipeline ->
+                recordAcceptance(
+                    pipeline,
+                    pipeline.metrics,
+                    pipeline.firstMinuteKibPerSecond,
+                    pipeline.lastMinuteKibPerSecond
+                )
+            }
             cameraStatus = "Receiver error: ${it.message ?: "invalid session"}"
         }
     }
 
     val active = session
     if (receiving) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             P1CameraPreview(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
                 onThreeAControl = { control ->
                     threeAControlRef.set(control)
                     if (receivePipeline != null) {
@@ -511,7 +656,7 @@ private fun SenderHome(
                         threeAControlRef.get()?.unlock()
                     }
                     calibratedAnchors = anchors
-                    cameraStatus = if (anchors == null) "Tap the four corner-anchor centers clockwise, starting at top-left."
+                    cameraStatus = if (anchors == null) "Point the camera at the sender's optical matrix; anchors are detected automatically."
                     else "Geometry calibrated; align and hold the optical frame steady."
                 },
                 onCalibrationProgress = { count ->
@@ -519,33 +664,92 @@ private fun SenderHome(
                 },
                 onImage = { image: ImageProxy ->
                 if (cameraStatus == "Camera ready" || cameraStatus == "Starting camera…") {
-                    cameraStatus = "Tap the four anchor centers clockwise, starting at top-left."
+                    cameraStatus = if (importedBootstrap == null) {
+                        "Point the camera at the sender's QR code to load the transfer."
+                    } else {
+                        "Point the camera at the sender's optical matrix; anchors are detected automatically."
+                    }
                 }
                 val pipeline = receivePipeline
                 if (pipeline != null && verifiedFile == null) runCatching { pipeline.pollStall() }
-                if (pipeline == null && importedManifest != null && importedBootstrap == null &&
-                    qrFrameCounter.incrementAndGet() % 3 == 0
+                if ((pipeline == null && importedBootstrap == null ||
+                        transferLoadedFromQr && verifiedFile != null) &&
+                    qrFrameCounter.incrementAndGet() % 3 == 0 &&
+                    qrScanPending.compareAndSet(false, true)
                 ) {
-                    val scanned = P1BootstrapQr.scan(image)
-                    if (scanned != null) {
-                        val manifest = importedManifest
-                        if (manifest != null && scanned.fileSize <= Int.MAX_VALUE.toULong() &&
-                            scanned.fileSize.toLong() == manifest.fileSize &&
-                            scanned.fileSha256.contentEquals(manifest.fileSha256) &&
-                            scanned.manifestHash.contentEquals(OptiFrameManifestCodec.hash(manifest))
-                        ) {
-                            importedBootstrap = scanned
-                            verifiedFile = null
-                            receiveMetrics = null
-                            manifestStatus = "Bootstrap QR verified for ${manifest.fileName}"
-                            cameraStatus = "Bootstrap accepted; align the sender's optical matrix."
-                        } else {
-                            cameraStatus = "QR found, but it does not match the imported manifest."
+                    val scanned = runCatching { P1BootstrapQr.scan(image) }.getOrNull()
+                    if (scanned == null) {
+                        qrScanPending.set(false)
+                    } else {
+                        scope.launch(Dispatchers.Main) {
+                            try {
+                                when (scanned) {
+                                    is P1BootstrapQr.ScanResult.Transfer -> {
+                                        val manifest = scanned.manifest
+                                        val bootstrap = scanned.bootstrap
+                                        if (importedBootstrap?.sessionId == bootstrap.sessionId) {
+                                            Unit
+                                        } else if (bootstrap.fileSize <= Int.MAX_VALUE.toULong()) {
+                                            if (transferLoadedFromQr && importedBootstrap != null) {
+                                                runCatching { bleClient?.close() }
+                                                bleClient = null
+                                                bleStatus = "BLE control is not connected"
+                                            }
+                                            importedManifest = manifest
+                                            importedBootstrap = bootstrap
+                                            transferLoadedFromQr = true
+                                            verifiedFile = null
+                                            receiveMetrics = null
+                                            calibratedAnchors = null
+                                            manifestStatus = "Transfer QR verified for ${manifest.fileName}"
+                                            cameraStatus =
+                                                "Transfer QR accepted; align the sender's optical matrix."
+                                            qrSuccessInfo = QrSuccessInfo(manifest.fileName, manifest.fileSize)
+                                            qrSuccessToken++
+                                        } else {
+                                            val message = "Transfer is too large for this receiver build"
+                                            manifestStatus = message
+                                            cameraStatus = message
+                                        }
+                                    }
+                                    is P1BootstrapQr.ScanResult.BootstrapOnly -> {
+                                        val manifest = importedManifest
+                                        val bootstrap = scanned.bootstrap
+                                        if (manifest == null) {
+                                            val message =
+                                                "This QR has no manifest; import the sender's .ofm or update the sender app."
+                                            manifestStatus = message
+                                            cameraStatus = message
+                                        } else if (
+                                            bootstrap.fileSize <= Int.MAX_VALUE.toULong() &&
+                                            bootstrap.fileSize.toLong() == manifest.fileSize &&
+                                            bootstrap.fileSha256.contentEquals(manifest.fileSha256) &&
+                                            bootstrap.manifestHash.contentEquals(
+                                                OptiFrameManifestCodec.hash(manifest)
+                                            )
+                                        ) {
+                                            importedBootstrap = bootstrap
+                                            verifiedFile = null
+                                            receiveMetrics = null
+                                            manifestStatus = "Bootstrap QR verified for ${manifest.fileName}"
+                                            cameraStatus =
+                                                "Bootstrap accepted; align the sender's optical matrix."
+                                            qrSuccessInfo = QrSuccessInfo(manifest.fileName, manifest.fileSize)
+                                            qrSuccessToken++
+                                        } else {
+                                            cameraStatus = "QR found, but it does not match the imported manifest."
+                                        }
+                                    }
+                                }
+                            } finally {
+                                qrScanPending.set(false)
+                            }
                         }
                     }
                 }
                 val manualAnchors = calibratedAnchors
                 var autoDetection: P1AnchorDetector.Detection? = null
+                var autoPlaneView: P1PerspectiveSampler.PlaneView? = null
                 if (pipeline != null && verifiedFile == null && manualAnchors == null &&
                     image.planes.size == 3
                 ) {
@@ -556,6 +760,7 @@ private fun SenderHome(
                     val planeView = P1PerspectiveSampler.PlaneView(
                         data, yPlane.rowStride, yPlane.pixelStride, image.width, image.height
                     )
+                    autoPlaneView = planeView
                     autoDetection = anchorTracker.locate(planeView)
                     if (autoDetection != null &&
                         !cameraStatus.startsWith("SHA-256 verified") &&
@@ -577,32 +782,132 @@ private fun SenderHome(
                             threeAStatus = it.applyFrameRate(receiverFast60)
                         }
                     }
-                    when (
-                        threeAPolicy.onFrame(
-                            anchorsLocked,
-                            threeAControlRef.get()?.meteringConverged == true,
-                            System.nanoTime()
-                        )
-                    ) {
-                        P1ThreeALockPolicy.Action.METER -> anchors?.let { points ->
-                            val centerX = (
-                                points.topLeftX + points.topRightX +
-                                    points.bottomRightX + points.bottomLeftX
-                                ) / 4.0
-                            val centerY = (
-                                points.topLeftY + points.topRightY +
-                                    points.bottomRightY + points.bottomLeftY
-                                ) / 4.0
-                            threeAControlRef.get()?.meter(image.width, image.height, centerX, centerY)
+                    val threeAControl = threeAControlRef.get()
+                    fun meterAtAnchors(points: P1PerspectiveSampler.AnchorPoints) {
+                        val centerX = (
+                            points.topLeftX + points.topRightX +
+                                points.bottomRightX + points.bottomLeftX
+                            ) / 4.0
+                        val centerY = (
+                            points.topLeftY + points.topRightY +
+                                points.bottomRightY + points.bottomLeftY
+                            ) / 4.0
+                        threeAControl?.meter(image.width, image.height, centerX, centerY)
+                    }
+                    val threeAAction = threeAPolicy.onFrame(
+                        anchorsLocked,
+                        threeAControl?.meteringConverged == true,
+                        System.nanoTime()
+                    )
+                    when (threeAAction) {
+                        P1ThreeALockPolicy.Action.METER -> anchors?.let(::meterAtAnchors)
+                        P1ThreeALockPolicy.Action.NONE -> {
+                            if (threeAPolicy.state == P1ThreeALockPolicy.State.METERING &&
+                                threeAControl?.meteringStarted != true
+                            ) {
+                                anchors?.let(::meterAtAnchors)
+                            }
                         }
                         P1ThreeALockPolicy.Action.LOCK -> {
-                            threeAStatus = threeAControlRef.get()?.lock() ?: "camera not ready"
+                            threeAStatus = threeAControl?.lock() ?: "camera not ready"
                         }
                         P1ThreeALockPolicy.Action.UNLOCK -> {
-                            threeAControlRef.get()?.unlock()
+                            threeAControl?.unlock()
                             threeAStatus = "3A re-metering"
                         }
-                        P1ThreeALockPolicy.Action.NONE -> Unit
+                    }
+                }
+                val captureDiagnostic = BuildConfig.DEBUG && diagnosticCaptureArmed.getAndSet(false)
+                val anchoredFrameNumber = if (BuildConfig.DEBUG && anchors != null) {
+                    diagnosticFrameCounter.incrementAndGet()
+                } else {
+                    0
+                }
+                var diagnosticGrid: ByteArray? = null
+                var frameDiagnosticsLine = P1ReceiverDiagnostics.line(
+                    image.width,
+                    image.height,
+                    image.imageInfo.rotationDegrees,
+                    anchors,
+                    null,
+                    null
+                )
+                if (BuildConfig.DEBUG && anchors != null &&
+                    (captureDiagnostic || anchoredFrameNumber % 10 == 0)
+                ) {
+                    var sampleError: String? = null
+                    diagnosticGrid = runCatching {
+                        P1PerspectiveSampler.sample(image, anchors)
+                    }.onFailure {
+                        sampleError = it.message ?: "grid sampling failed"
+                    }.getOrNull()
+                    val orientationScore = if (usingAuto && autoDetection != null) {
+                        autoPlaneView?.let { plane ->
+                            runCatching {
+                                P1AnchorDetector.pilotOrientationScore(
+                                    plane, checkNotNull(autoDetection).homography
+                                )
+                            }.getOrNull()
+                        }
+                    } else {
+                        null
+                    }
+                    frameDiagnosticsLine = P1ReceiverDiagnostics.line(
+                        image.width,
+                        image.height,
+                        image.imageInfo.rotationDegrees,
+                        anchors,
+                        diagnosticGrid,
+                        orientationScore,
+                        sampleError
+                    )
+                    diagnosticsLine = frameDiagnosticsLine
+                } else if (captureDiagnostic) {
+                    diagnosticsLine = frameDiagnosticsLine
+                }
+                if (captureDiagnostic) {
+                    val captureResult = runCatching {
+                        val jpeg = P1ReceiverDiagnostics.yuvToJpeg(image)
+                        val gridPng = diagnosticGrid?.let(P1ReceiverDiagnostics::gridToPng)
+                        val anchorPoints = anchors?.let { points ->
+                            "TL=(${points.topLeftX},${points.topLeftY}), " +
+                                "TR=(${points.topRightX},${points.topRightY}), " +
+                                "BR=(${points.bottomRightX},${points.bottomRightY}), " +
+                                "BL=(${points.bottomLeftX},${points.bottomLeftY})"
+                        } ?: "none"
+                        val info = buildString {
+                            appendLine("manufacturer=${Build.MANUFACTURER}")
+                            appendLine("model=${Build.MODEL}")
+                            appendLine("image=${image.width}x${image.height}")
+                            appendLine("rotationDegrees=${image.imageInfo.rotationDegrees}")
+                            appendLine("cameraStatus=$cameraStatus")
+                            appendLine("threeAStatus=$threeAStatus")
+                            appendLine("diagnostics=$frameDiagnosticsLine")
+                            appendLine("outOfImageCells=${P1PerspectiveSampler.lastOutOfImageCells}")
+                            appendLine("anchorPoints=$anchorPoints")
+                            appendLine("manualAnchors=${manualAnchors != null}")
+                            autoDetection?.let {
+                                appendLine("detectionInliers=${it.inliers}")
+                                appendLine("detectionRmsErrorCells=${it.rmsErrorCells}")
+                                appendLine("detectionP95ErrorCells=${it.p95ErrorCells}")
+                            }
+                            appendLine("lastDecodeError=$lastDecodeError")
+                        }
+                        P1ReceiverDiagnosticArchive(jpeg, gridPng, info)
+                    }
+                    if (captureResult.isSuccess) {
+                        diagnosticArchiveRef.set(captureResult.getOrThrow())
+                        scope.launch(Dispatchers.Main) {
+                            diagnosticSaveStatus = "Diagnostic captured; choose a save location."
+                            diagnosticArchiveSaver.launch(
+                                "optiframe-diag-${System.currentTimeMillis()}.zip"
+                            )
+                        }
+                    } else {
+                        val error = captureResult.exceptionOrNull()
+                        scope.launch(Dispatchers.Main) {
+                            diagnosticSaveStatus = "Diagnostic capture failed: ${error?.message ?: "unknown error"}"
+                        }
                     }
                 }
                 if (pipeline != null && anchors != null && verifiedFile == null) {
@@ -610,6 +915,12 @@ private fun SenderHome(
                         val result = pipeline.accept(image, anchors)
                         if (usingAuto) anchorTracker.onDecodeResult(true)
                         if (result.verified) {
+                            recordAcceptance(
+                                pipeline,
+                                result.metrics,
+                                result.firstMinuteKibPerSecond,
+                                result.lastMinuteKibPerSecond
+                            )
                             verifiedFile = receiveFile
                             receiveMetrics = result.metrics
                             cameraStatus = "SHA-256 verified · ${importedManifest?.fileSize ?: 0} bytes received."
@@ -619,22 +930,42 @@ private fun SenderHome(
                             cameraStatus = "Receiving · ${result.metrics.macroblocksDecoded} macroblocks decoded."
                         }
                     } catch (error: P1CompositeFrameException) {
+                        lastDecodeError = error.message ?: "decode failed"
                         if (usingAuto) anchorTracker.onDecodeResult(true)
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
-                            cameraStatus.startsWith("Receiving")
+                            cameraStatus.startsWith("Receiving") ||
+                            cameraStatus.startsWith("Waiting for a decodable P1 frame")
                         ) {
-                            cameraStatus = "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                            cameraStatus = if (pipeline.metrics.macroblocksDecoded == 0L) {
+                                "Waiting for a decodable P1 frame (press Start on the sender if it isn't streaming) · ${error.message ?: "decode failed"}"
+                            } else {
+                                "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                            }
                         }
                     } catch (error: IllegalArgumentException) {
+                        lastDecodeError = error.message ?: "decode failed"
                         if (usingAuto) anchorTracker.onDecodeResult(false)
                         if (cameraStatus.startsWith("Geometry calibrated") ||
                             cameraStatus.startsWith("Auto anchors") ||
-                            cameraStatus.startsWith("Receiving")
+                            cameraStatus.startsWith("Receiving") ||
+                            cameraStatus.startsWith("Waiting for a decodable P1 frame")
                         ) {
-                            cameraStatus = "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                            cameraStatus = if (pipeline.metrics.macroblocksDecoded == 0L) {
+                                "Waiting for a decodable P1 frame (press Start on the sender if it isn't streaming) · ${error.message ?: "decode failed"}"
+                            } else {
+                                "Looking for a valid P1 frame: ${error.message ?: "decode failed"}"
+                            }
                         }
                     } catch (error: IllegalStateException) {
+                        if (pipeline.verificationFailed) {
+                            recordAcceptance(
+                                pipeline,
+                                pipeline.metrics,
+                                pipeline.firstMinuteKibPerSecond,
+                                pipeline.lastMinuteKibPerSecond
+                            )
+                        }
                         cameraStatus = "Receiver error: ${error.message ?: "invalid session"}"
                     }
                 }
@@ -644,6 +975,10 @@ private fun SenderHome(
                 Text("OptiFrame receiver", color = Color.White)
                 Text(cameraStatus, color = Color.White)
                 Text(threeAStatus, color = Color.White)
+                if (BuildConfig.DEBUG) {
+                    Text(diagnosticsLine, color = Color.White)
+                    diagnosticSaveStatus?.let { Text(it, color = Color.White) }
+                }
                 val m4Control = importedBootstrap?.let {
                     (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) != 0L
                 } == true
@@ -677,7 +1012,9 @@ private fun SenderHome(
                         }
                     }
                 }
-                Text("Tap the center of each 6×6 corner anchor clockwise: top-left, top-right, bottom-right, bottom-left. Repeat to recalibrate.", color = Color.White)
+                if (importedBootstrap != null) {
+                    Text("Tap the center of each 6×6 corner anchor clockwise: top-left, top-right, bottom-right, bottom-left. Repeat to recalibrate.", color = Color.White)
+                }
                 if (verifiedFile != null) {
                     receiveMetrics?.let { metrics ->
                         val rate = metrics.goodputKibPerSecond?.let { "%.1f KiB/s".format(it) } ?: "n/a"
@@ -696,14 +1033,39 @@ private fun SenderHome(
                         reportSaver.launch("${name}_${if (m4Control) "m4" else "m3"}_report.json")
                     }) { Text("Export JSON benchmark report") }
                 }
-                Button(onClick = {
-                    receiving = false
-                    calibratedAnchors = null
-                    anchorTracker.reset()
-                    threeAPolicy.reset()
-                    threeAControlRef.get()?.unlock()
-                }) { Text("Stop camera") }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (BuildConfig.DEBUG) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = !diagnosticCaptureArmed.get(),
+                            onClick = {
+                                diagnosticCaptureArmed.set(true)
+                                diagnosticSaveStatus = "Diagnostic capture armed; waiting for the next frame."
+                            }
+                        ) { Text("Save diagnostic frame") }
+                    }
+                    Button(
+                        modifier = Modifier.weight(if (BuildConfig.DEBUG) 1f else 2f),
+                        onClick = {
+                            receiving = false
+                            calibratedAnchors = null
+                            anchorTracker.reset()
+                            threeAPolicy.reset()
+                            threeAControlRef.get()?.unlock()
+                        }
+                    ) { Text("Stop camera") }
+                }
             }
+            }
+            P1QrSuccessOverlay(
+                qrSuccessToken = qrSuccessToken,
+                info = qrSuccessInfo,
+                modifier = Modifier.align(Alignment.Center)
+            )
         }
     } else if (active != null) {
         val view = LocalView.current
@@ -712,22 +1074,26 @@ private fun SenderHome(
             view.keepScreenOn = true
             onDispose { view.keepScreenOn = previous }
         }
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.Bottom
-        ) {
-            if (showBootstrapQr && bootstrapPayload != null) {
-                val qr = remember(bootstrapPayload) { P1BootstrapQr.render(checkNotNull(bootstrapPayload)) }
+        val renderedQr = remember(bootstrapPayload, active.manifest, showBootstrapQr) {
+            if (showBootstrapQr) {
+                bootstrapPayload?.let { P1BootstrapQr.render(it, active.manifest) }
+            } else {
+                null
+            }
+        }
+        val transferDisplay: @Composable (Modifier) -> Unit = { displayModifier ->
+            if (renderedQr != null) {
                 Image(
-                    bitmap = qr.asImageBitmap(),
+                    bitmap = renderedQr.bitmap.asImageBitmap(),
                     contentDescription = "OptiFrame transfer bootstrap QR code",
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentScale = ContentScale.Fit
+                    modifier = displayModifier,
+                    contentScale = ContentScale.Fit,
+                    filterQuality = FilterQuality.None
                 )
             } else {
                 P1OpticalDisplay(
                     session = active,
-                    modifier = Modifier.weight(1f),
+                    modifier = displayModifier,
                     onStateChange = {
                         transferState = it
                         if (it == P1Safe30DisplayState.COMPLETE || it == P1Safe30DisplayState.CANCELLED) {
@@ -737,13 +1103,19 @@ private fun SenderHome(
                     }
                 )
             }
+        }
+        val transferControls: @Composable (Modifier) -> Unit = { controlsModifier ->
             Column(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                modifier = controlsModifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text("${active.manifest.fileName} · ${active.progress.completedBlocks}/${active.progress.totalBlocks} blocks", color = Color.White)
                 Text(if (showBootstrapQr) {
-                    "Receiver setup: scan this QR, import the manifest, then connect BLE feedback for M4."
+                    if (renderedQr?.includesManifest == false) {
+                        "File too large to fit the manifest in the QR: export the receiver manifest (.ofm) and import it on the receiver, then scan this QR."
+                    } else {
+                        "Receiver setup: scan this QR to load the transfer; connect BLE feedback for M4."
+                    }
                 } else when (transferState) {
                     P1Safe30DisplayState.DISPLAYING -> if (active.fast60) "Displaying P1 FAST60 frames" else "Displaying SAFE30 frames"
                     P1Safe30DisplayState.WAITING_FOR_FEEDBACK -> if (active.fast60) "Waiting for BLE block feedback" else "Waiting for receiver feedback"
@@ -778,10 +1150,31 @@ private fun SenderHome(
                 }) { Text("Stop") }
             }
         }
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            if (maxWidth > maxHeight) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    transferDisplay(Modifier.weight(1f).fillMaxHeight())
+                    transferControls(
+                        Modifier.width(220.dp).fillMaxHeight().verticalScroll(rememberScrollState())
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Bottom
+                ) {
+                    transferDisplay(Modifier.weight(1f).fillMaxWidth())
+                    transferControls(Modifier)
+                }
+            }
+        }
     } else {
         Scaffold { padding ->
             Column(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
+                modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -797,6 +1190,20 @@ private fun SenderHome(
                         onClick = { homeMode = HomeMode.RECEIVE },
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
                     ) { Text("Receive") }
+                }
+                if (BuildConfig.DEBUG) {
+                    P1AcceptanceChecklistCard(
+                        records = acceptanceRecords,
+                        preset = acceptancePreset,
+                        onPresetChange = { selected ->
+                            acceptanceStore.setPreset(selected)
+                            acceptancePreset = selected
+                        },
+                        onReset = {
+                            acceptanceStore.clear()
+                            acceptanceRecords = emptyList()
+                        }
+                    )
                 }
                 when (homeMode) {
                     HomeMode.SEND -> {
@@ -826,7 +1233,7 @@ private fun SenderHome(
                         OutlinedButton(onClick = {
                             cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
                         },
-                            enabled = importedManifest != null && (
+                            enabled = (
                                 importedBootstrap?.let {
                                     (it.capabilityFlags and OptiFrameCapabilities.P1_FAST60_BLE_CONTROL) == 0L
                                 } != false ||
@@ -841,6 +1248,131 @@ private fun SenderHome(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun P1QrSuccessOverlay(
+    qrSuccessToken: Int,
+    info: QrSuccessInfo?,
+    modifier: Modifier = Modifier
+) {
+    if (qrSuccessToken == 0 || info == null) return
+
+    val scale = remember(qrSuccessToken) { Animatable(0.6f) }
+    val checkProgress = remember(qrSuccessToken) { Animatable(0f) }
+    val overlayAlpha = remember(qrSuccessToken) { Animatable(1f) }
+    val haptic = LocalHapticFeedback.current
+
+    LaunchedEffect(qrSuccessToken) {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        launch { scale.animateTo(1f, spring()) }
+        launch { checkProgress.animateTo(1f, tween(350)) }
+        delay(1_500)
+        overlayAlpha.animateTo(0f, tween(300))
+    }
+
+    Column(
+        modifier = modifier
+            .graphicsLayer { alpha = overlayAlpha.value }
+            .background(Color.Black.copy(alpha = 0.78f), RoundedCornerShape(20.dp))
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Canvas(
+            modifier = Modifier
+                .size(88.dp)
+                .graphicsLayer {
+                    scaleX = scale.value
+                    scaleY = scale.value
+                }
+        ) {
+            drawCircle(Color(0xFF2E7D32))
+            val start = Offset(size.width * 0.25f, size.height * 0.52f)
+            val middle = Offset(size.width * 0.43f, size.height * 0.69f)
+            val end = Offset(size.width * 0.76f, size.height * 0.32f)
+            val progress = checkProgress.value
+            if (progress > 0f) {
+                val firstProgress = (progress * 2f).coerceAtMost(1f)
+                drawLine(
+                    Color.White,
+                    start,
+                    Offset(
+                        start.x + (middle.x - start.x) * firstProgress,
+                        start.y + (middle.y - start.y) * firstProgress
+                    ),
+                    strokeWidth = size.minDimension * 0.085f,
+                    cap = StrokeCap.Round
+                )
+            }
+            if (progress > 0.5f) {
+                val secondProgress = (progress - 0.5f) * 2f
+                drawLine(
+                    Color.White,
+                    middle,
+                    Offset(
+                        middle.x + (end.x - middle.x) * secondProgress,
+                        middle.y + (end.y - middle.y) * secondProgress
+                    ),
+                    strokeWidth = size.minDimension * 0.085f,
+                    cap = StrokeCap.Round
+                )
+            }
+        }
+        Text(
+            "QR verified · ${info.fileName} · ${String.format(Locale.US, "%.2f", info.fileSizeBytes / 1_048_576.0)} MiB",
+            color = Color.White,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun P1AcceptanceChecklistCard(
+    records: List<P1AcceptanceRecord>,
+    preset: P1AcceptancePreset,
+    onPresetChange: (P1AcceptancePreset) -> Unit,
+    onReset: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text("Test build · V1 acceptance", style = MaterialTheme.typography.titleSmall)
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                SegmentedButton(
+                    selected = preset == P1AcceptancePreset.DEMO,
+                    onClick = { onPresetChange(P1AcceptancePreset.DEMO) },
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                ) { Text("Demo") }
+                SegmentedButton(
+                    selected = preset == P1AcceptancePreset.FULL,
+                    onClick = { onPresetChange(P1AcceptancePreset.FULL) },
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                ) { Text("Full") }
+            }
+            Text(preset.label, style = MaterialTheme.typography.bodySmall)
+            P1AcceptanceChecklist.evaluate(records, preset).forEach { item ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when (item.passed) {
+                            true -> "✓"
+                            false -> "✗"
+                            null -> "–"
+                        },
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    Text(
+                        "${item.label}  ${item.value}",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+            TextButton(onClick = onReset) { Text("Reset checklist") }
         }
     }
 }

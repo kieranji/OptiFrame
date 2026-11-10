@@ -42,6 +42,67 @@ class P1AnchorDetectorTest {
     }
 
     @Test
+    fun `detects 180 degree rotation using pilot orientation`() {
+        val homography = P1SyntheticFrames.composeHomographies(
+            P1SyntheticFrames.frontalHomography(),
+            doubleArrayOf(-1.0, 0.0, 160.0, 0.0, -1.0, 96.0, 0.0, 0.0)
+        )
+        val detection = P1AnchorDetector.detect(
+            P1SyntheticFrames.render(
+                homography,
+                includeAnchors = true,
+                includePilots = true,
+                seed = 15L
+            )
+        )
+
+        assertNotNull(detection)
+        P1SyntheticFrames.assertAnchorsNearTruth(checkNotNull(detection), homography, 0.3)
+    }
+
+    @Test
+    fun `detects 90 degree rotation in portrait buffer`() {
+        val homography = P1SyntheticFrames.composeHomographies(
+            P1SyntheticFrames.frontalHomography(scale = 4.0, offsetX = 100.0, offsetY = 100.0),
+            doubleArrayOf(0.0, -1.0, 96.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+        )
+        val detection = P1AnchorDetector.detect(
+            P1SyntheticFrames.render(
+                homography,
+                includeAnchors = true,
+                includePilots = true,
+                seed = 16L,
+                canvasWidth = 600,
+                canvasHeight = 800
+            )
+        )
+
+        assertNotNull(detection)
+        P1SyntheticFrames.assertAnchorsNearTruth(
+            checkNotNull(detection),
+            homography,
+            maxErrorCells = 0.3,
+            pixelsPerCell = 4.0
+        )
+    }
+
+    @Test
+    fun `does not detect anchors arranged as a square`() {
+        val squareHomography = doubleArrayOf(5.0, 0.0, 80.0, 0.0, 9.0, 80.0, 0.0, 0.0)
+
+        assertNull(
+            P1AnchorDetector.detect(
+                P1SyntheticFrames.render(
+                    squareHomography,
+                    includeAnchors = true,
+                    seed = 17L,
+                    canvasHeight = 960
+                )
+            )
+        )
+    }
+
+    @Test
     fun `does not detect random cells without anchors`() {
         assertNull(
             P1AnchorDetector.detect(

@@ -1,6 +1,7 @@
 package com.kieran.optiframe.ui.optical
 
 import com.kieran.optiframe.protocol.P1ControlBandLayout
+import com.kieran.optiframe.protocol.Of8Palette
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -17,6 +18,7 @@ object P1AnchorDetector {
     private const val MAX_ROLL_DEGREES = 15
     private const val PREFILTER_MIN_MATCHES = 28
     private const val MAX_QUAD_CLUSTERS = 12
+    private const val MIN_PILOT_ORIENTATION_CORRELATION = 0.5
 
     data class Detection(
         val anchors: P1PerspectiveSampler.AnchorPoints,
@@ -36,7 +38,7 @@ object P1AnchorDetector {
         val canonical: Pair<Double, Double>,
         val image: Pair<Double, Double>
     )
-    private data class ScoredDetection(val detection: Detection)
+    private data class ScoredDetection(val detection: Detection, val quad: List<Cluster>)
     private data class NormalizedPoints(
         val points: List<Pair<Double, Double>>,
         val centerX: Double,
@@ -55,10 +57,7 @@ object P1AnchorDetector {
     }
     private val edgeOffsets = doubleArrayOf(1.0, 2.0, 4.0, 5.0)
 
-    /**
-     * The identical anchor pattern has a 180-degree orientation ambiguity; ordering
-     * assumes the frame is roughly upright (less than 45 degrees of roll).
-     */
+    /** Identical anchors leave a 180-degree ambiguity, resolved during detection by the pilot colors. */
     internal fun detect(luma: P1PerspectiveSampler.PlaneView): Detection? {
         val (threshold, dark) = binarize(luma) ?: return null
         val candidates = findCandidates(dark, luma.width, luma.height)
@@ -95,13 +94,22 @@ object P1AnchorDetector {
                             (evaluated.inliers == previous.inliers &&
                                 evaluated.rmsErrorCells < previous.rmsErrorCells)
                         ) {
-                            best = ScoredDetection(evaluated)
+                            best = ScoredDetection(evaluated, quad)
                         }
                     }
                 }
             }
         }
-        return best?.detection
+        val selected = best ?: return null
+        val rotatedQuad = List(4) { selected.quad[(it + 2) % 4] }
+        val rotatedDetection = runCatching {
+            refineDetection(luma, threshold, rotatedQuad)
+        }.getOrNull()?.takeIf(::passesAcceptance) ?: return selected.detection
+        val originalScore = pilotOrientationScore(luma, selected.detection.homography)
+        val rotatedScore = pilotOrientationScore(luma, rotatedDetection.homography)
+        return if (rotatedScore > originalScore &&
+            rotatedScore >= MIN_PILOT_ORIENTATION_CORRELATION
+        ) rotatedDetection else selected.detection
     }
 
     /** Re-locks [previous] in a new frame by re-searching each anchor near its last position; null if the lock is lost. */
@@ -138,6 +146,54 @@ object P1AnchorDetector {
         return runCatching { refineDetection(luma, threshold, refined) }
             .getOrNull()
             ?.takeIf(::passesAcceptance)
+    }
+
+    internal fun pilotOrientationScore(
+        luma: P1PerspectiveSampler.PlaneView,
+        homography: DoubleArray
+    ): Double {
+        val sampled = DoubleArray(16)
+        val expected = DoubleArray(16)
+        var index = 0
+        for (rect in listOf(P1ControlBandLayout.leftPilots, P1ControlBandLayout.rightPilots)) {
+            for (label in 0 until 8) {
+                val canonicalX = rect.x + 2 * (label % 4) + 1.0
+                val canonicalY = rect.y + 2 * (label / 4) + 1.0
+                val point = runCatching {
+                    P1PerspectiveSampler.map(homography, canonicalX, canonicalY)
+                }.getOrNull() ?: return Double.NEGATIVE_INFINITY
+                if (!point.first.isFinite() || !point.second.isFinite() ||
+                    point.first !in 0.0..(luma.width - 1.0) ||
+                    point.second !in 0.0..(luma.height - 1.0)
+                ) return Double.NEGATIVE_INFINITY
+                sampled[index] = runCatching {
+                    P1PerspectiveSampler.bilinear(luma, point.first, point.second)
+                }.getOrNull() ?: return Double.NEGATIVE_INFINITY
+
+                val color = Of8Palette.symbolToColor(label)
+                expected[index] = 0.299 * color.red + 0.587 * color.green + 0.114 * color.blue
+                index++
+            }
+        }
+
+        val sampledMean = sampled.average()
+        val expectedMean = expected.average()
+        var covariance = 0.0
+        var sampledVariance = 0.0
+        var expectedVariance = 0.0
+        for (i in sampled.indices) {
+            val sampledDelta = sampled[i] - sampledMean
+            val expectedDelta = expected[i] - expectedMean
+            covariance += sampledDelta * expectedDelta
+            sampledVariance += sampledDelta * sampledDelta
+            expectedVariance += expectedDelta * expectedDelta
+        }
+        val denominator = sqrt(sampledVariance * expectedVariance)
+        return if (denominator > 0.0 && denominator.isFinite()) {
+            covariance / denominator
+        } else {
+            Double.NEGATIVE_INFINITY
+        }
     }
 
     private fun binarize(luma: P1PerspectiveSampler.PlaneView): Pair<Int, BooleanArray>? {
@@ -457,7 +513,12 @@ object P1AnchorDetector {
         val centerY = points.sumOf { it.y } / 4.0
         val around = points.sortedBy { atan2(it.y - centerY, it.x - centerX) }
         val topLeft = around.indices.minByOrNull { around[it].x + around[it].y } ?: return null
-        return List(4) { around[(topLeft + it) % 4] }
+        val ordered = List(4) { around[(topLeft + it) % 4] }
+        return if (topEdgeLength(ordered) < sideEdgeLength(ordered)) {
+            List(4) { ordered[(it + 1) % 4] }
+        } else {
+            ordered
+        }
     }
 
     private fun validQuad(quad: List<Cluster>): Boolean {
@@ -465,6 +526,8 @@ object P1AnchorDetector {
         if (modules.minOrNull() == null || modules.minOrNull()!! <= 0.0 ||
             modules.maxOrNull()!! / modules.minOrNull()!! > 2.0
         ) return false
+        val aspectRatio = topEdgeLength(quad) / sideEdgeLength(quad)
+        if (!aspectRatio.isFinite() || aspectRatio !in 1.3..2.6) return false
         val turns = DoubleArray(4) { index ->
             val a = quad[index]
             val b = quad[(index + 1) % 4]
@@ -473,6 +536,14 @@ object P1AnchorDetector {
         }
         return turns.all { it > 1e-6 } || turns.all { it < -1e-6 }
     }
+
+    private fun topEdgeLength(quad: List<Cluster>): Double =
+        hypot(quad[0].x - quad[1].x, quad[0].y - quad[1].y) +
+            hypot(quad[3].x - quad[2].x, quad[3].y - quad[2].y)
+
+    private fun sideEdgeLength(quad: List<Cluster>): Double =
+        hypot(quad[0].x - quad[3].x, quad[0].y - quad[3].y) +
+            hypot(quad[1].x - quad[2].x, quad[1].y - quad[2].y)
 
     private fun refineDetection(
         luma: P1PerspectiveSampler.PlaneView,
